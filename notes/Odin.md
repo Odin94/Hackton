@@ -75,10 +75,70 @@ Agentic workflows, knowledge pipelines, market place of plugins (also open sourc
 ### Reply Challenge Ideas
 * Auto-scheduler for friend group hangouts - automates all the annoying followups and pushing people to share their availability and interest  (boys calls, TTRPG sessions)
 * Kleinanzeigen-matcher - Define types of produts you're interested in at what price, agent then scrapes Kleinanzeigen and pings you with recommendations  (cognee db of stuff you have and like to compare to stuff?)
-* 
+* Weekly scraping of uni websites for things you may need (deadlines, signups, cool events, interesting courses etc.)
+* Trouble was doing the smart thing for lectures (prepare by reading slides, go to tutoriums, do homework, read the recommended book chapters) - do a Whoop-style diary that learns what really helps you and recommends / shows the improvement to motivate you
+* Alex' solution: Journal app where you fill I did xyz, attended this lecture (liked it/didn't like it), learns what helps you - starts out with obvious general help (other successful students do xyz for coldstart), learns what really helps you personally ("you ate spicy food and your studying session after was bad - may don't do that")
+  * Smack all your slides into Cognee to have specific material recommendations you can use (specific "study this thing" recommendation")
+  * Once it knows your full curriculum and learns from your personal input it can give holistic recommendations
+  * Give you stats on how your improvement works
+  * "Mentor that sees what's going well or poorly in your life and helps you improve"
+  * Grows with you (onboarding buddy, personal recommendations, maybe expand into career stuff later on? Help you find thesis topic)
+  * Multiple agents - one gives context and proposal, others judge (critic/researcher/proposer - focused on exams/personal goals/studying etc.)
+  * Runs 24/7 on some server, connects to web & phone
+  * Interaction: Text it throughout the day, maybe it pings you a questionnaire daily, maybe it reads your calendar to know when to ask you about things?
+  * Dump curriculum and lecture slides
+    * Quizzes you with mini exams to track your performance (mixture of open/closed questions, shows progress indicators)
+    * Pings you with helpful advice in the moment ("go to bed soon", "have you studied today? You should", "Wanna do a quiz?", "I see that your calendar is X, don't you want to do Y?")
+    * After quizzes it gives you feedback "something seems off, should we diagnose?", "you did well and are on a great path, treat yourself!"
+  * "Deadline Agent" - reminds you of deadlines, hounds you about your plans - "if you keep studying like this, you will fail the exam!"
+  
+  * Core feature: 
+    * Study quizzes & performance improvement suggestions based on surveys
+    * Web App with 24/7 agent that can ping you
+    * It has your curriculum in it's memory layer
+    * Creates study plan with you and actively enforces that you follow it (hounds you, confirms with quizzes)
+      * Quiz after lecture?
+  
+  * Components:
+    * File/data upload
+    * Websocket chat
+    * Study plan wizard
+    * Schedule setter
+    * Agent harness that messages you 
+    * Run all this stuff locally
 
+  * Golden path:
+    * Sign up
+    * Chatbot interface that talks you through onboarding experience (Uni? Goals? Materials? Deadlines?)
+    * Proactively pings you in chat "study this!" then "do this quiz I made!"
+    * Shows you study success indicator, warns you if you go off track
+  
+  * Extensions:
+    * Give it your TUM online credentials and it perpetually pulls study material / deadline info
+    * Whatsapp connection / Telegram bot?
+    * Calendar integration?
+    * Reminder to keep uploading study materials
+    * Public Demo on AWS
+    * Tell it how far you got in the lecture ("only until page 30")
+    * Deprecating/Archiving old, outdated knowledge
+
+  * Demo:
+    * Have the agent proactively ping you in demo ("you finished lecture XYZ today, do this quiz!")
+    * Maybe time your phone/laptop to loudly ping you right when Alex's words-demo is done
+    * 3-4 Live prompts ("what did I struggle with?", "What are my next steps?")
+
+  * Remote APIs:
+    * Cognee for study materials? (or do we just slap them into s3?) -> generate Quizzes#
+
+  * Deliverables:
+    * Memory layer with 1 semester of study data (Cognee)  -  Alex
+    * Backend that harnesses an LLM and connects to Cognee and a UI  -  Odin  (have a loop where the LLM is triggered to ask if it wants to do one of 10 things - our individual features it can do)
+    * UI with Chatbot that connects to backend  -  Amin
+    * Backend that uses LLM to proactively ping user about quizzes, journaling, doing things
+    * (mini extension) progress / study success indicator - are you on track to pass your exam by deadline?
 
 ### Reply Q&A
+
 * They seem very student-focused (talking about moodle and tumonline and missing cool reply workshops at TUM, Uni knowledge)
 * Really focused on the "campus copilot" and connecting systems
 * Criteria: 25& Innovation/Ambition, 25% UI/UX, 25% Quality, 25% Presentation
@@ -86,3 +146,19 @@ Agentic workflows, knowledge pipelines, market place of plugins (also open sourc
 * You can bother the REPLY folks and make them help you with your implementation
 * Winners get to go to REPLY office for food, snacks and meeting REPLY employees
 * "All student life improving solutions are accepted", solving beurocracy is a fav for them though
+
+
+
+### Brainstorming issues
+* Keep up with deadlines (interviews, exams, sign-ups, homework deadlines)
+*
+
+
+
+### Odin's backend LLM part thoughts
+* We want some sort of cron-y thing that triggers the LLM and asks it if it wants to do things based on it's info
+* TODOdin: Look up tools for building harnesses and triggering LLM with time
+* What tools does our LLM have?
+  * Create quiz
+  * Modify schedule
+  * (evaluate performance; we can probably do that with simple statistics?)
