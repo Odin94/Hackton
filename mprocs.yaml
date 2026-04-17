@@ -1,0 +1,7 @@
+procs:
+  backend:
+    shell: "uv run uvicorn main:app --reload"
+    cwd: "backend"
+  frontend:
+    shell: "npm run dev"
+    cwd: "frontend"
