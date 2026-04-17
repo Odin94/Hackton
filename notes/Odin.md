@@ -58,3 +58,31 @@ They do consulting for all sorts of tech things
 * Google will give a finalist $25k GCP credits lol - apply to their startup accelerator program! (they say)
 
 ## AMD
+(something about their dev cloud)
+
+## Cognee
+Also helps you build AI Agents, open source
+* Free access to their cloud solution - connect data in (dump in files), builds a knowledge graph, talk to your data (even via API)
+* Basically vector db as a service
+* $500 for best cognee
+
+## Dify
+Agentic workflows, knowledge pipelines, market place of plugins (also open source I think?)
+
+## 11Elevenlabs
+* Price: 1/2 year of scale tier
+
+### Reply Challenge Ideas
+* Auto-scheduler for friend group hangouts - automates all the annoying followups and pushing people to share their availability and interest  (boys calls, TTRPG sessions)
+* Kleinanzeigen-matcher - Define types of produts you're interested in at what price, agent then scrapes Kleinanzeigen and pings you with recommendations  (cognee db of stuff you have and like to compare to stuff?)
+* 
+
+
+### Reply Q&A
+* They seem very student-focused (talking about moodle and tumonline and missing cool reply workshops at TUM, Uni knowledge)
+* Really focused on the "campus copilot" and connecting systems
+* Criteria: 25& Innovation/Ambition, 25% UI/UX, 25% Quality, 25% Presentation
+* They give you an AWS account with credentials
+* You can bother the REPLY folks and make them help you with your implementation
+* Winners get to go to REPLY office for food, snacks and meeting REPLY employees
+* "All student life improving solutions are accepted", solving beurocracy is a fav for them though
