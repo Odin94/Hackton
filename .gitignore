@@ -1,2 +1,6 @@
 .oprocs/
 *.pyc
+__pycache__/
+.env
+backend/.cognee_system/
+backend/seed/.state.json

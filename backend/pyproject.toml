@@ -1,9 +1,12 @@
 [project]
 name = "backend"
 version = "0.1.0"
-description = "Add your description here"
+description = "Study Diary backend — cognee memory layer + agent orchestration"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi[standard]>=0.136.0",
+    "cognee==1.0.0",
+    "pydantic-settings>=2.0",
+    "litellm>=1.50",
 ]
