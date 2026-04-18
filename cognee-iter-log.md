@@ -9,6 +9,14 @@ Conventions:
 
 ---
 
+## Iteration 4 — quiz quality + robustness (82 tests, all passing)
+
+- **Quiz prompt rewritten:** now enumerates grounded-only / question-type diversity / anti-restatement / 1–2 sentence answers / JSON schema rules. Demo-visible quality lift at zero additional cost. Prompt stays small (~200 tokens).
+- **`source_ref` extraction robust to three chunk shapes:** `{"is_part_of": {"name": ...}}` (dict form — happy path), `{"is_part_of": "flat-name"}` (string form), and typed `DataPoint`-style objects (`chunk.is_part_of.name`). Added `_chunk_text` helper using the same triple-shape pattern for text extraction. Verified against cognee's `ChunksRetriever` source and `DocumentChunkWithEntities` payload schema — payload flows through the vector engine which can return either dict or typed form depending on the backend.
+- **`types.py` bounds:** `DiaryEntry.text` [1, 20000] chars, `DiaryEntry.tags` ≤ 32 items, `Material.source` [1, 512], `Material.course` [1, 64]. Catches pathological input at model construction, not just at HTTP boundary — protects the seed CLI and agent-loop call paths too.
+- **Tests:** +8 service tests covering the three chunk shapes and the new helper unit behavior; +8 type tests for the new Pydantic bounds. Full suite 82 tests, 0.3s.
+- Logged deltas 4, 5, 6 in `notes/spec-deltas.md`.
+
 ## Iteration 3 — test suite (65 tests, all passing)
 
 - `backend/tests/` scaffolded; `pyproject.toml` adds pytest + pytest-asyncio + httpx under `[dependency-groups].dev` and configures `asyncio_mode = "auto"`.
