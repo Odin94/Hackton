@@ -13,9 +13,24 @@ from agent.scheduler import start_scheduler
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
+_log = logging.getLogger(__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await cognee.run_startup_migrations()
+    # cognee's alembic `ab7e313804ae_permission_system_rework` migration raises
+    # NoSuchTableError("acls") on a fresh relational DB — the migration reads
+    # column metadata before the base tables exist. Don't let that block boot;
+    # cognee's pipeline `setup()` creates the schema on first add/cognify via
+    # SQLAlchemy models directly, which works fine.
+    try:
+        await cognee.run_startup_migrations()
+    except Exception as e:
+        _log.warning(
+            "cognee.run_startup_migrations() failed; continuing (schema will be "
+            "created lazily on first add/cognify): %s",
+            e,
+        )
     await init_db()
     llm_task, dispatch_task = start_scheduler()
     yield

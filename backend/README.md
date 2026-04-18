@@ -73,10 +73,14 @@ LLM_API_KEY=<OpenRouter key>
 LLM_INSTRUCTOR_MODE=tool_call
 
 EMBEDDING_PROVIDER=openai_compatible
-EMBEDDING_MODEL=openai/text-embedding-3-small
-EMBEDDING_ENDPOINT=https://openrouter.ai/api/v1
-EMBEDDING_API_KEY=<OpenRouter key>
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_ENDPOINT=https://api.openai.com/v1
+EMBEDDING_API_KEY=<OpenAI key>      # direct; preferred when available
 EMBEDDING_DIMENSIONS=1536
+# Fallback if you only have an OpenRouter key:
+#   EMBEDDING_MODEL=openai/text-embedding-3-small
+#   EMBEDDING_ENDPOINT=https://openrouter.ai/api/v1
+#   EMBEDDING_API_KEY=<OpenRouter key>
 
 DATA_ROOT_DIRECTORY=./.cognee_system
 TELEMETRY_DISABLED=true

@@ -26,3 +26,16 @@ _abs = Path(settings.data_root_directory).expanduser().resolve()
 os.environ["DATA_ROOT_DIRECTORY"] = str(_abs / "data")
 os.environ["SYSTEM_ROOT_DIRECTORY"] = str(_abs / "system")
 os.environ["CACHE_ROOT_DIRECTORY"] = str(_abs / "cache")
+
+# cognee doesn't auto-create these directories on first run — missing dirs
+# surface as cryptic "unable to open database file" SQLite errors. Create them
+# here so the first ingest/cognify call works on a fresh VPS.
+for _sub in (_abs / "data", _abs / "system" / "databases", _abs / "cache"):
+    _sub.mkdir(parents=True, exist_ok=True)
+
+# Claude Code's shell env sets ALL_PROXY=socks5h://... which httpx tries to
+# use, but socksio isn't installed in the cognee dep tree. HTTPS_PROXY (the
+# HTTP proxy) is still available and works for OpenAI/OpenRouter calls —
+# drop the SOCKS entries so httpx falls through to HTTPS_PROXY.
+for _k in ("ALL_PROXY", "all_proxy"):
+    os.environ.pop(_k, None)

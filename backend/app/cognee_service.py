@@ -106,7 +106,13 @@ def _sanitize(text: str) -> str:
 _TRANSIENT_CLASSES: tuple[type[BaseException], ...] = (TimeoutError, ConnectionError)
 _RATE_LIMIT_MARKERS = ("rate limit", "429")
 _TRANSIENT_MARKERS = ("timeout", "timed out", "503", "502")
-_NO_DATA_MARKERS = ("no data found", "nodataerror", "empty knowledge graph")
+_NO_DATA_MARKERS = (
+    "no data found",
+    "nodataerror",
+    "empty knowledge graph",
+    "no datasets found",
+    "datasetnotfounderror",
+)
 
 
 def _chunk_text(chunk: object) -> str:
@@ -122,12 +128,27 @@ def _chunk_text(chunk: object) -> str:
 
 
 def _extract_source_ref(chunk: object) -> str | None:
-    """Pull the originating document name from a chunk, if present.
+    """Pull a useful source label from a cognee chunk payload.
 
-    `is_part_of` may be: a dict (typical qdrant/lance payload), a pydantic-like
-    object (if the vector engine returns typed DataPoints), or a bare string
-    (some configs store just the document name). Return None if none apply.
+    Tries in order:
+    1. `belongs_to_set[0]` — cognee v1's `IndexSchema` payload exposes this
+       when `node_set=[…]` was passed at ingest time. This is what we use
+       now: the course label (e.g. "Einführung_in_die_Informatik") is more
+       useful for UX than the underlying filename.
+    2. `is_part_of` — a richer `DocumentChunk` payload would expose the
+       originating document (dict, string, or pydantic-ish object). Most
+       cognee configs don't include this in the vector payload, but keep
+       the fallback for engines that do.
     """
+    if isinstance(chunk, dict):
+        bts = chunk.get("belongs_to_set")
+    else:
+        bts = getattr(chunk, "belongs_to_set", None)
+    if isinstance(bts, list) and bts:
+        first = bts[0]
+        if first:
+            return str(first)
+
     if isinstance(chunk, dict):
         part = chunk.get("is_part_of")
     else:

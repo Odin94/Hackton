@@ -69,6 +69,14 @@ def test_wrap_no_data_message_is_no_data_error():
     assert wrapped.retryable is True
 
 
+def test_wrap_dataset_not_found_is_no_data_error():
+    """Querying a dataset that doesn't exist (e.g. empty diary) returns
+    DatasetNotFoundError — map to NoDataError so callers can handle uniformly."""
+    wrapped = cognee_service._wrap(RuntimeError("DatasetNotFoundError: No datasets found. (Status code: 404)"))
+    assert isinstance(wrapped, NoDataError)
+    assert wrapped.retryable is True
+
+
 def test_wrap_value_error_is_base_class_and_not_retryable():
     wrapped = cognee_service._wrap(ValueError("bad schema"))
     # Base class, specific subclasses are NOT matched
@@ -537,6 +545,32 @@ def test_extract_source_ref_missing_returns_none():
     assert cognee_service._extract_source_ref({}) is None
     assert cognee_service._extract_source_ref({"is_part_of": ""}) is None
     assert cognee_service._extract_source_ref({"is_part_of": None}) is None
+
+
+def test_extract_source_ref_uses_belongs_to_set_first():
+    """Cognee v1's IndexSchema payload exposes `belongs_to_set` (from
+    `node_set=[course]` at ingest time) but not `is_part_of` — the course
+    label is what's actually retrievable in our config."""
+    chunk = {"belongs_to_set": ["ML-L3"], "is_part_of": None}
+    assert cognee_service._extract_source_ref(chunk) == "ML-L3"
+
+
+def test_extract_source_ref_empty_belongs_to_set_falls_through():
+    chunk = {"belongs_to_set": [], "is_part_of": {"name": "fallback.md"}}
+    assert cognee_service._extract_source_ref(chunk) == "fallback.md"
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_surfaces_course_label_as_source_ref(
+    mock_cognee, mock_litellm
+):
+    """End-to-end: QuizItem.source_ref carries the course label from the
+    `belongs_to_set` attached at ingest."""
+    mock_cognee.search.return_value = [
+        {"text": "lecture content", "belongs_to_set": ["ML-L3"], "is_part_of": None}
+    ]
+    items = await cognee_service.generate_quiz("topic", n=1)
+    assert items[0].source_ref == "ML-L3"
 
 
 @pytest.mark.asyncio
