@@ -12,7 +12,14 @@ from datetime import UTC, datetime
 import pytest
 
 from app import cognee_service
-from app.cognee_service import CogneeServiceError
+from app.cognee_service import (
+    CogneeServiceError,
+    LLMTimeoutError,
+    MalformedLLMResponseError,
+    NoDataError,
+    UpstreamError,
+    UpstreamRateLimitError,
+)
 from app.types import DiaryEntry, Material
 from tests.conftest import llm_response
 
@@ -41,41 +48,57 @@ def test_sanitize_rejects_null_bytes_only():
         cognee_service._sanitize("\x00\x00")
 
 
-# ----- _wrap retryability classifier --------------------------------------
+# ----- _wrap classifier → typed subclasses --------------------------------
 
-def test_wrap_timeout_instance_is_retryable():
+def test_wrap_timeout_instance_is_upstream_error():
     wrapped = cognee_service._wrap(TimeoutError())
+    assert isinstance(wrapped, UpstreamError)
     assert wrapped.retryable is True
 
 
-def test_wrap_builtin_timeout_is_retryable():
-    wrapped = cognee_service._wrap(TimeoutError("boom"))
-    assert wrapped.retryable is True
-
-
-def test_wrap_connection_error_is_retryable():
+def test_wrap_connection_error_is_upstream_error():
     wrapped = cognee_service._wrap(ConnectionError())
+    assert isinstance(wrapped, UpstreamError)
     assert wrapped.retryable is True
 
 
-def test_wrap_value_error_is_not_retryable():
+def test_wrap_no_data_message_is_no_data_error():
+    # Cognee raises NoDataError with a message like "No data found in the system, please add data first."
+    wrapped = cognee_service._wrap(RuntimeError("NoDataError: No data found in the system"))
+    assert isinstance(wrapped, NoDataError)
+    assert wrapped.retryable is True
+
+
+def test_wrap_value_error_is_base_class_and_not_retryable():
     wrapped = cognee_service._wrap(ValueError("bad schema"))
+    # Base class, specific subclasses are NOT matched
+    assert type(wrapped) is CogneeServiceError
     assert wrapped.retryable is False
 
 
-def test_wrap_rate_limit_message_is_retryable():
+def test_wrap_rate_limit_message_is_rate_limit_error():
     wrapped = cognee_service._wrap(RuntimeError("upstream returned 429 rate limit"))
+    assert isinstance(wrapped, UpstreamRateLimitError)
     assert wrapped.retryable is True
 
 
-def test_wrap_503_message_is_retryable():
+def test_wrap_503_message_is_upstream_error():
     wrapped = cognee_service._wrap(RuntimeError("HTTP 503 from provider"))
+    assert isinstance(wrapped, UpstreamError)
     assert wrapped.retryable is True
 
 
-def test_wrap_generic_error_is_not_retryable():
+def test_wrap_generic_error_is_base_class_not_retryable():
     wrapped = cognee_service._wrap(RuntimeError("schema validation failed"))
+    assert type(wrapped) is CogneeServiceError
     assert wrapped.retryable is False
+
+
+def test_all_subclasses_are_cognee_service_error():
+    """Callers catching CogneeServiceError must still catch all subclasses."""
+    for cls in (NoDataError, LLMTimeoutError, MalformedLLMResponseError,
+                UpstreamError, UpstreamRateLimitError):
+        assert issubclass(cls, CogneeServiceError)
 
 
 # ----- add_diary_entry / add_material --------------------------------------
@@ -283,18 +306,18 @@ async def test_generate_quiz_happy_path(mock_cognee, mock_litellm):
 
 
 @pytest.mark.asyncio
-async def test_generate_quiz_empty_chunks_raises(mock_cognee, mock_litellm):
+async def test_generate_quiz_empty_chunks_raises_no_data(mock_cognee, mock_litellm):
     mock_cognee.search.return_value = []
-    with pytest.raises(CogneeServiceError, match="no material"):
+    with pytest.raises(NoDataError, match="no material"):
         await cognee_service.generate_quiz("obscure-topic", n=3)
     mock_litellm.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_generate_quiz_all_textless_chunks_raises(mock_cognee, mock_litellm):
+async def test_generate_quiz_all_textless_chunks_raises_no_data(mock_cognee, mock_litellm):
     """Non-empty chunks list where every chunk has blank text → don't call LLM."""
     mock_cognee.search.return_value = [{"text": ""}, {"text": "   "}, {}]
-    with pytest.raises(CogneeServiceError, match="no text content") as excinfo:
+    with pytest.raises(NoDataError, match="no text content") as excinfo:
         await cognee_service.generate_quiz("topic", n=2)
     assert excinfo.value.retryable is True
     mock_litellm.assert_not_awaited()
@@ -427,7 +450,7 @@ async def test_generate_quiz_gives_up_after_second_bad_json(mock_cognee, mock_li
         llm_response("bad 1"),
         llm_response("bad 2"),
     ]
-    with pytest.raises(CogneeServiceError) as excinfo:
+    with pytest.raises(MalformedLLMResponseError) as excinfo:
         await cognee_service.generate_quiz("topic", n=1)
     assert excinfo.value.retryable is True
     assert mock_litellm.await_count == 2
@@ -473,7 +496,7 @@ async def test_generate_quiz_llm_timeout_surfaces_as_retryable(
 
     mock_litellm.side_effect = slow
 
-    with pytest.raises(CogneeServiceError) as excinfo:
+    with pytest.raises(LLMTimeoutError) as excinfo:
         await cognee_service.generate_quiz("topic", n=1)
     assert excinfo.value.retryable is True
     assert "timeout" in str(excinfo.value).lower()

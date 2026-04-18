@@ -32,9 +32,51 @@ _locks: dict[str, asyncio.Lock] = {"diary": asyncio.Lock(), "materials": asyncio
 
 
 class CogneeServiceError(Exception):
-    def __init__(self, message: str, *, retryable: bool = False):
+    """Base for all cognee-service errors.
+
+    `retryable` is a hint to the caller: True means "try again later may help"
+    (timeouts, rate limits, indexing races); False means "don't retry without
+    fixing something" (validation, schema, unknown). Subclasses set sensible
+    defaults; callers can still isinstance-check the specific subclass.
+    """
+
+    default_retryable: bool = False
+
+    def __init__(self, message: str, *, retryable: bool | None = None):
         super().__init__(message)
-        self.retryable = retryable
+        self.retryable = self.default_retryable if retryable is None else retryable
+
+
+class NoDataError(CogneeServiceError):
+    """No chunks/results found for the query. Often means cognify hasn't run
+    yet, or the index is mid-write. Caller may retry after waiting."""
+
+    default_retryable = True
+
+
+class LLMTimeoutError(CogneeServiceError):
+    """Our LiteLLM call exceeded `Settings.llm_call_timeout_seconds`."""
+
+    default_retryable = True
+
+
+class MalformedLLMResponseError(CogneeServiceError):
+    """LLM returned JSON we can't parse or items not matching the schema."""
+
+    default_retryable = True
+
+
+class UpstreamRateLimitError(CogneeServiceError):
+    """Provider returned 429 / explicit rate-limit signal."""
+
+    default_retryable = True
+
+
+class UpstreamError(CogneeServiceError):
+    """Generic transient upstream failure (connection, 502/503, class-based
+    timeout from cognee/litellm internals). Retryable by default."""
+
+    default_retryable = True
 
 
 @asynccontextmanager
@@ -57,12 +99,10 @@ def _sanitize(text: str) -> str:
     return cleaned
 
 
-_RETRYABLE_CLASSES: tuple[type[BaseException], ...] = (
-    asyncio.TimeoutError,
-    TimeoutError,
-    ConnectionError,
-)
-_RETRYABLE_MARKERS = ("timeout", "timed out", "rate limit", "429", "503", "502")
+_TRANSIENT_CLASSES: tuple[type[BaseException], ...] = (TimeoutError, ConnectionError)
+_RATE_LIMIT_MARKERS = ("rate limit", "429")
+_TRANSIENT_MARKERS = ("timeout", "timed out", "503", "502")
+_NO_DATA_MARKERS = ("no data found", "nodataerror", "empty knowledge graph")
 
 
 def _chunk_text(chunk: object) -> str:
@@ -99,11 +139,19 @@ def _extract_source_ref(chunk: object) -> str | None:
 
 
 def _wrap(exc: Exception) -> CogneeServiceError:
+    """Convert an arbitrary exception into the most specific CogneeServiceError
+    subclass we can identify. Callers branch on type; the base class is the
+    catch-all for everything we don't recognize."""
     msg = f"{type(exc).__name__}: {exc}"
-    retryable = isinstance(exc, _RETRYABLE_CLASSES) or any(
-        marker in msg.lower() for marker in _RETRYABLE_MARKERS
-    )
-    return CogneeServiceError(msg, retryable=retryable)
+    lower = msg.lower()
+
+    if any(m in lower for m in _NO_DATA_MARKERS):
+        return NoDataError(msg)
+    if any(m in lower for m in _RATE_LIMIT_MARKERS):
+        return UpstreamRateLimitError(msg)
+    if isinstance(exc, _TRANSIENT_CLASSES) or any(m in lower for m in _TRANSIENT_MARKERS):
+        return UpstreamError(msg)
+    return CogneeServiceError(msg)
 
 
 async def add_diary_entry(entry: DiaryEntry) -> None:
@@ -207,79 +255,68 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
         raise ValueError("n must be >= 1")
 
     async with _timed("quiz", topic=topic, n=n):
-        return await _generate_quiz_inner(topic, n)
-
-
-async def _generate_quiz_inner(topic: str, n: int) -> list[QuizItem]:
-    try:
-        chunks = await cognee.search(
-            query_type=SearchType.CHUNKS,
-            query_text=topic,
-            datasets=["materials"],
-            top_k=10,
-        )
-    except Exception as e:
-        raise _wrap(e) from e
-
-    if isinstance(chunks, dict):
-        chunks = [chunks]
-    if not chunks:
-        raise CogneeServiceError(f"no material found for topic: {topic}")
-
-    context_text = "\n\n---\n\n".join(
-        str(_chunk_text(c)) for c in chunks if _chunk_text(c)
-    )
-    if not context_text.strip():
-        # All chunks returned empty text — proceeding would let the LLM hallucinate
-        # freely. Surface as retryable in case the vector index is mid-write.
-        raise CogneeServiceError(
-            f"chunks for topic '{topic}' had no text content", retryable=True
-        )
-    source_ref = _extract_source_ref(chunks[0])
-
-    system_prompt = (
-        "You generate study quiz items strictly grounded in the provided context.\n"
-        "Rules:\n"
-        "1. Every question must be answerable from the context alone — no outside knowledge.\n"
-        "2. Mix question types: definitional, mechanism, application, comparison.\n"
-        "3. Avoid trivial restatement ('What does the context say about X?'). Test understanding.\n"
-        "4. Answers must be 1–2 sentences, factual, self-contained.\n"
-        f"5. Return exactly {n} items.\n"
-        "Output JSON: {\"items\":[{\"question\":str,\"answer\":str}, ...]}."
-    )
-    user_prompt = f"Topic: {topic}\n\nContext:\n{context_text}"
-
-    raw_items = await _quiz_llm_call_with_retry(system_prompt, user_prompt)
-
-    if len(raw_items) > n:
-        raw_items = raw_items[:n]
-    elif len(raw_items) < n:
-        log.warning("quiz returned %d items, expected %d", len(raw_items), n)
-
-    return [
-        QuizItem(
-            question=str(item["question"]),
-            answer=str(item["answer"]),
-            topic=topic,
-            source_ref=source_ref,
-        )
-        for item in raw_items
-    ]
-
-
-async def _quiz_llm_call_with_retry(system_prompt: str, user_prompt: str) -> list[dict]:
-    """One-shot retry on malformed JSON — spec §9 risk mitigation."""
-    last_exc: CogneeServiceError | None = None
-    for attempt in (1, 2):
         try:
-            return await _quiz_llm_call(system_prompt, user_prompt)
-        except CogneeServiceError as e:
-            if not e.retryable or attempt == 2:
-                raise
-            log.info("quiz retry after retryable error: %s", e)
-            last_exc = e
-    # Unreachable, but keeps type-checker happy.
-    raise last_exc  # type: ignore[misc]
+            chunks = await cognee.search(
+                query_type=SearchType.CHUNKS,
+                query_text=topic,
+                datasets=["materials"],
+                top_k=10,
+            )
+        except Exception as e:
+            raise _wrap(e) from e
+
+        if isinstance(chunks, dict):
+            chunks = [chunks]
+        if not chunks:
+            raise NoDataError(
+                f"no material found for topic: {topic}. "
+                "Run /cognify on the materials dataset first."
+            )
+
+        context_text = "\n\n---\n\n".join(
+            str(_chunk_text(c)) for c in chunks if _chunk_text(c)
+        )
+        if not context_text.strip():
+            raise NoDataError(f"chunks for topic '{topic}' had no text content")
+        source_ref = _extract_source_ref(chunks[0])
+
+        system_prompt = (
+            "You generate study quiz items strictly grounded in the provided context.\n"
+            "Rules:\n"
+            "1. Every question must be answerable from the context alone — no outside knowledge.\n"
+            "2. Mix question types: definitional, mechanism, application, comparison.\n"
+            "3. Avoid trivial restatement ('What does the context say about X?'). Test understanding.\n"
+            "4. Answers must be 1–2 sentences, factual, self-contained.\n"
+            f"5. Return exactly {n} items.\n"
+            'Output JSON: {"items":[{"question":str,"answer":str}, ...]}.'
+        )
+        user_prompt = f"Topic: {topic}\n\nContext:\n{context_text}"
+
+        # One retry on malformed LLM output only — spec §9. Timeouts/upstream
+        # errors bubble up directly; retrying them at the same budget doesn't help.
+        for attempt in (1, 2):
+            try:
+                raw_items = await _quiz_llm_call(system_prompt, user_prompt)
+                break
+            except MalformedLLMResponseError as e:
+                if attempt == 2:
+                    raise
+                log.info("quiz retry after malformed response: %s", e)
+
+        if len(raw_items) > n:
+            raw_items = raw_items[:n]
+        elif len(raw_items) < n:
+            log.warning("quiz returned %d items, expected %d", len(raw_items), n)
+
+        return [
+            QuizItem(
+                question=str(item["question"]),
+                answer=str(item["answer"]),
+                topic=topic,
+                source_ref=source_ref,
+            )
+            for item in raw_items
+        ]
 
 
 async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
@@ -306,9 +343,8 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
             timeout=settings.llm_call_timeout_seconds,
         )
     except TimeoutError as e:
-        raise CogneeServiceError(
-            f"LLM call exceeded {settings.llm_call_timeout_seconds}s timeout",
-            retryable=True,
+        raise LLMTimeoutError(
+            f"LLM call exceeded {settings.llm_call_timeout_seconds}s timeout"
         ) from e
     except Exception as e:
         raise _wrap(e) from e
@@ -319,15 +355,11 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
         items = parsed["items"]
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         log.warning("quiz JSON parse failed: %s; content=%r", e, content[:200])
-        raise CogneeServiceError(
-            "quiz generation returned invalid JSON", retryable=True
-        ) from e
+        raise MalformedLLMResponseError("quiz generation returned invalid JSON") from e
 
     if not isinstance(items, list) or not all(
         isinstance(i, dict) and "question" in i and "answer" in i for i in items
     ):
         log.warning("quiz items malformed: %r", str(items)[:200])
-        raise CogneeServiceError(
-            "quiz generation returned malformed items", retryable=True
-        )
+        raise MalformedLLMResponseError("quiz generation returned malformed items")
     return items
