@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import sys
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime, time
 from pathlib import Path
 
 from app import cognee_service
@@ -29,7 +29,7 @@ def _parse_diary_date(stem: str) -> datetime | None:
         return None
     try:
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        return datetime.combine(datetime(y, mo, d).date(), time.min, tzinfo=timezone.utc)
+        return datetime.combine(datetime(y, mo, d).date(), time.min, tzinfo=UTC)
     except ValueError:
         return None
 

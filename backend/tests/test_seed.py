@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -14,12 +14,12 @@ from scripts import seed
 
 def test_parse_diary_date_happy():
     ts = seed._parse_diary_date("2026-04-08-mon")
-    assert ts == datetime(2026, 4, 8, 0, 0, tzinfo=timezone.utc)
+    assert ts == datetime(2026, 4, 8, 0, 0, tzinfo=UTC)
 
 
 def test_parse_diary_date_no_suffix_ok():
     ts = seed._parse_diary_date("2026-04-08")
-    assert ts == datetime(2026, 4, 8, 0, 0, tzinfo=timezone.utc)
+    assert ts == datetime(2026, 4, 8, 0, 0, tzinfo=UTC)
 
 
 def test_parse_diary_date_invalid_returns_none():
@@ -74,7 +74,7 @@ async def test_cmd_ingest_happy_path(seed_layout: Path, monkeypatch):
         c for c in add_diary.await_args_list
         if "wed" in c.args[0].text
     )
-    assert dated_call.args[0].ts == datetime(2026, 4, 10, 0, 0, tzinfo=timezone.utc)
+    assert dated_call.args[0].ts == datetime(2026, 4, 10, 0, 0, tzinfo=UTC)
     # Verify course prefix extraction on materials.
     course_call = next(
         c for c in add_material.await_args_list

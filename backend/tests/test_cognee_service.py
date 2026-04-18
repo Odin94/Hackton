@@ -7,16 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from app import cognee_service
 from app.cognee_service import CogneeServiceError
 from app.types import DiaryEntry, Material
-
 from tests.conftest import llm_response
-
 
 # ----- _sanitize -----------------------------------------------------------
 
@@ -46,7 +44,7 @@ def test_sanitize_rejects_null_bytes_only():
 # ----- _wrap retryability classifier --------------------------------------
 
 def test_wrap_timeout_instance_is_retryable():
-    wrapped = cognee_service._wrap(asyncio.TimeoutError())
+    wrapped = cognee_service._wrap(TimeoutError())
     assert wrapped.retryable is True
 
 
@@ -84,7 +82,7 @@ def test_wrap_generic_error_is_not_retryable():
 
 @pytest.mark.asyncio
 async def test_add_diary_entry_sends_formatted_body(mock_cognee):
-    ts = datetime(2026, 4, 14, 9, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 4, 14, 9, 0, tzinfo=UTC)
     entry = DiaryEntry(text="Did ML-L3 today", ts=ts, tags=["ml", "pomodoro"])
 
     await cognee_service.add_diary_entry(entry)

@@ -27,11 +27,12 @@ def test_diary_entry_default_tags_empty():
 
 
 def test_material_empty_fields_rejected():
-    for field, kwargs in (
-        ("text", {"text": "", "source": "s", "course": "c"}),
-        ("source", {"text": "t", "source": "", "course": "c"}),
-        ("course", {"text": "t", "source": "s", "course": ""}),
-    ):
+    cases = [
+        {"text": "", "source": "s", "course": "c"},
+        {"text": "t", "source": "", "course": "c"},
+        {"text": "t", "source": "s", "course": ""},
+    ]
+    for kwargs in cases:
         with pytest.raises(ValidationError):
             Material(**kwargs)  # type: ignore[arg-type]
 

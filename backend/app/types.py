@@ -1,11 +1,11 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
 
 class DiaryEntry(BaseModel):
     text: str = Field(min_length=1, max_length=20000)
-    ts: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    ts: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
     tags: list[str] = Field(default_factory=list, max_length=32)
 
 

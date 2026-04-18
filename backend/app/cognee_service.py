@@ -12,15 +12,15 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Literal
-
-from app.config import settings  # must import before cognee to normalize env
+from typing import Literal
 
 import cognee
 import litellm
 from cognee.api.v1.search import SearchType
 
+from app.config import settings  # must import before cognee to normalize env
 from app.types import DiaryEntry, Material, QuizItem
 
 log = logging.getLogger(__name__)
@@ -305,7 +305,7 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
             ),
             timeout=settings.llm_call_timeout_seconds,
         )
-    except asyncio.TimeoutError as e:
+    except TimeoutError as e:
         raise CogneeServiceError(
             f"LLM call exceeded {settings.llm_call_timeout_seconds}s timeout",
             retryable=True,
