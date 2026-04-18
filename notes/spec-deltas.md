@@ -24,6 +24,14 @@ Format per entry:
 - **Why:** Trivial liveness endpoint — useful for frontend boot checks and for detecting config misconfiguration (since `config.py` raises at import, a responding `/health` proves env is wired).
 - **Status:** proposed — implemented on `cognee/iter`. Spec table not yet amended.
 
+## Delta 13 — Quiz via tool-use instead of `response_format`
+
+- **Section:** §3 quiz call / §9 risk "LiteLLM strips response_format on OpenRouter".
+- **Change:** `_quiz_llm_call` now passes `tools=[{type:function,function:{name:"emit_quiz",parameters:_QUIZ_SCHEMA}}]` + `tool_choice={"type":"function","function":{"name":"emit_quiz"}}` and parses the result from `response.choices[0].message.tool_calls[0].function.arguments` (JSON string or pre-parsed dict). Previous `extra_body={"response_format":…}` workaround removed.
+- **Why:** The `response_format` + OpenRouter path is still buggy per BerriAI/litellm#10465. Cognee itself uses `LLM_INSTRUCTOR_MODE=tool_call` internally for the same reason — this aligns our call with theirs. Tool-use is broadly supported across LiteLLM providers and doesn't traverse the buggy response_format code path.
+- **Behavior on refusal:** if the model ignores `tool_choice` and returns plain content, we raise `MalformedLLMResponseError`; the retry loop tries once more, and after two refusals a 503 surfaces. Cheaper-to-diagnose failure mode than silent free-form text coming back as if it were valid JSON.
+- **Status:** implemented on main. Three new tests: tool-refusal → `MalformedLLMResponseError`, dict-arguments accepted, and a sanity check that the call uses `tools=` + `tool_choice=` and NOT `response_format`/`extra_body`. 101 tests passing, 0 lint.
+
 ## Delta 12 — `add_material_from_file` + PDF support + course-nested seed layout
 
 - **Section:** §3 service / §5 seed CLI / §6 supported formats.

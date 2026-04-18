@@ -19,6 +19,18 @@ Conventions:
 
 ---
 
+## Iteration 14 — quiz → tool-use mode (101 tests)
+
+Preempts the "LiteLLM strips `response_format` on OpenRouter" (#4 from my audit) before first live run. Bug fires per-model and per-version — rather than verify-and-pray, I moved to the function-calling path that cognee's internal calls already use.
+
+- **`_quiz_llm_call` rewritten:** passes `tools=[{type:function,function:{name:"emit_quiz",…_QUIZ_SCHEMA}}]` + `tool_choice=...forces emit_quiz...`. Parses `response.choices[0].message.tool_calls[0].function.arguments` (accepts str or pre-parsed dict for LiteLLM backend variance).
+- **Failure modes map cleanly to `MalformedLLMResponseError`:** (a) `tool_calls` missing (model refused to use the tool), (b) arguments not parseable JSON, (c) `items` shape wrong. Existing retry loop handles all three; after two refusals, 503.
+- **Removed `extra_body={"response_format":…}` hack** entirely — no longer traversing the buggy LiteLLM path at all.
+- **Tests:** +3 (`test_generate_quiz_surfaces_missing_tool_call_as_malformed`, `test_generate_quiz_accepts_pre_parsed_tool_arguments`, `test_generate_quiz_uses_function_calling_not_response_format`). Existing tests still pass — the `llm_response()` helper in `conftest.py` was updated to build tool-call shaped responses, so existing tests transparently use the new path. 101 passing, 0 lint.
+- Logged as delta 13.
+
+**#4 moved from "needs verification" to "replaced with a known-good path"** — cognee uses tool-call mode internally for structured output, so this is the same code path as the rest of our stack. No separate verification needed.
+
 ## Iteration 13 — multi-course corpus + PDF ingest (98 tests)
 
 Amin pushed the real study materials: 42 PDFs across 4 courses in `/data/<course>/materials/`. Plumbing updated.
