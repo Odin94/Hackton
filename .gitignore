@@ -5,3 +5,4 @@ __pycache__/
 backend/.cognee_system/
 backend/seed/.state.json
 .claude/
+agent_memory.db

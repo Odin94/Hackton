@@ -82,12 +82,19 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
 
     Returns the full conversation as a list of message dicts.
     """
+    logger.debug(
+        "_quiz_llm_call start model=%s system_len=%d user_len=%d",
+        MODEL, len(system_prompt), len(user_prompt),
+    )
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
+    turn = 0
 
     while True:
+        turn += 1
+        logger.debug("_quiz_llm_call LLM request turn=%d messages_in_history=%d", turn, len(messages))
         response = await litellm.acompletion(
             model=MODEL,
             messages=messages,
@@ -96,6 +103,11 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
         )
 
         assistant_msg = response.choices[0].message
+        finish_reason = getattr(response.choices[0], "finish_reason", "unknown")
+        logger.debug(
+            "_quiz_llm_call LLM response turn=%d finish_reason=%s content_len=%d",
+            turn, finish_reason, len(assistant_msg.content or ""),
+        )
 
         # Append the raw assistant message to history
         messages.append(assistant_msg.model_dump(exclude_none=True))
@@ -110,11 +122,13 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
             )
             return messages
 
+        logger.debug("_quiz_llm_call turn=%d executing %d tool call(s)", turn, len(tool_calls))
         # Execute each tool call and inject results before the next LLM turn
         for tc in tool_calls:
             args: dict = json.loads(tc.function.arguments)
             logger.info("Tool call → %s(%s)", tc.function.name, args)
             result = await _dispatch_tool(tc.function.name, args)
+            logger.debug("Tool result tool=%s result=%.120s", tc.function.name, result)
             messages.append(
                 {
                     "role": "tool",

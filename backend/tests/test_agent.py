@@ -10,11 +10,12 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent.database import Base
 from agent.db import read_recent, write_entry
-from agent.models import Notification, Quiz, QuizResult, ScheduleEvent, User
+from agent.models import AgentLog, ChatMessage, Notification, Quiz, QuizResult, ScheduleEvent, User
 from agent.quiz_workflow import (
     _dispatch_due_notifications_impl,
     _generate_quizzes_impl,
@@ -60,8 +61,17 @@ async def patched_session_local(engine):
 # ---------------------------------------------------------------------------
 
 
+_user_counter = 0
+
+
 async def _make_user(session: AsyncSession, **kw) -> User:
-    user = User(name=kw.get("name", "Alice"), email=kw.get("email", "alice@example.com"))
+    global _user_counter
+    _user_counter += 1
+    user = User(
+        username=kw.get("username", f"user_{_user_counter}"),
+        name=kw.get("name", None),
+        email=kw.get("email", None),
+    )
     session.add(user)
     await session.flush()
     return user
@@ -81,12 +91,18 @@ def _future(minutes: int = 5) -> datetime:
 
 
 async def test_create_user(session: AsyncSession):
-    user = User(name="Bob", email="bob@example.com", phone_number="+49123456789")
+    user = User(
+        username="bob",
+        name="Bob",
+        email="bob@example.com",
+        phone_number="+49123456789",
+    )
     session.add(user)
     await session.commit()
 
     fetched = await session.get(User, user.id)
     assert fetched is not None
+    assert fetched.username == "bob"
     assert fetched.email == "bob@example.com"
     assert fetched.phone_number == "+49123456789"
     assert fetched.created_at is not None
@@ -147,6 +163,50 @@ async def test_create_quiz_result(session: AsyncSession):
     assert fetched is not None
     assert fetched.correct_answers == 4
     assert fetched.false_answers == 1
+
+
+# ---------------------------------------------------------------------------
+# ChatMessage
+# ---------------------------------------------------------------------------
+
+
+async def test_create_chat_messages_for_user(session: AsyncSession):
+    user = await _make_user(session)
+    session.add_all(
+        [
+            ChatMessage(
+                user_id=user.id,
+                timestamp=_past(2),
+                author="user",
+                sequence_number=1,
+                content="What quizzes do I have today?",
+            ),
+            ChatMessage(
+                user_id=user.id,
+                timestamp=_past(1),
+                author="system",
+                sequence_number=2,
+                content="You have a machine learning quiz this afternoon.",
+            ),
+        ]
+    )
+    await session.commit()
+
+    fetched = (
+        (
+            await session.execute(
+                select(ChatMessage)
+                .where(ChatMessage.user_id == user.id)
+                .order_by(ChatMessage.sequence_number.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    assert [message.author for message in fetched] == ["user", "system"]
+    assert [message.sequence_number for message in fetched] == [1, 2]
+    assert fetched[1].content == "You have a machine learning quiz this afternoon."
 
 
 # ---------------------------------------------------------------------------
@@ -269,13 +329,27 @@ async def test_generate_quizzes_skips_event_on_no_cognee_data(session: AsyncSess
 # ---------------------------------------------------------------------------
 
 
-async def test_dispatch_marks_due_notifications_complete(session: AsyncSession):
-    user = await _make_user(session, email="dispatch@example.com")
+@pytest.fixture
+def connected_ws_manager():
+    """Patch the ws_manager used by quiz_workflow so all users appear connected
+    and sends always succeed.  Returned object exposes ``send`` for inspection."""
+    send_mock = AsyncMock(return_value=True)
+    with (
+        patch("agent.quiz_workflow.ws_manager.is_connected", return_value=True),
+        patch("agent.quiz_workflow.ws_manager.send", send_mock),
+    ):
+        yield send_mock
+
+
+async def test_dispatch_marks_due_notifications_complete(
+    session: AsyncSession, connected_ws_manager
+):
+    user = await _make_user(session)
 
     notif = Notification(
         user_id=user.id,
         status="pending",
-        target_datetime=_past(1),   # already due
+        target_datetime=_past(1),  # already due
         content="Quiz ready!",
     )
     session.add(notif)
@@ -288,13 +362,13 @@ async def test_dispatch_marks_due_notifications_complete(session: AsyncSession):
     assert notif.status == "complete"
 
 
-async def test_dispatch_ignores_future_notifications(session: AsyncSession):
-    user = await _make_user(session, email="future@example.com")
+async def test_dispatch_ignores_future_notifications(session: AsyncSession, connected_ws_manager):
+    user = await _make_user(session)
 
     notif = Notification(
         user_id=user.id,
         status="pending",
-        target_datetime=_future(60),   # not yet due
+        target_datetime=_future(60),  # not yet due
         content="Later quiz!",
     )
     session.add(notif)
@@ -307,8 +381,10 @@ async def test_dispatch_ignores_future_notifications(session: AsyncSession):
     assert notif.status == "pending"
 
 
-async def test_dispatch_ignores_already_complete_notifications(session: AsyncSession):
-    user = await _make_user(session, email="complete@example.com")
+async def test_dispatch_ignores_already_complete_notifications(
+    session: AsyncSession, connected_ws_manager
+):
+    user = await _make_user(session)
 
     notif = Notification(
         user_id=user.id,
@@ -323,9 +399,30 @@ async def test_dispatch_ignores_already_complete_notifications(session: AsyncSes
     assert dispatched == 0
 
 
-async def test_dispatch_includes_quiz_payload(session: AsyncSession):
-    """When a notification has a quiz, the dispatch reads quiz data without error."""
-    user = await _make_user(session, email="quizpayload@example.com")
+async def test_dispatch_defers_when_user_offline(session: AsyncSession):
+    """Notifications for offline users stay pending."""
+    user = await _make_user(session)
+
+    notif = Notification(
+        user_id=user.id,
+        status="pending",
+        target_datetime=_past(1),
+        content="You're offline!",
+    )
+    session.add(notif)
+    await session.flush()
+
+    # ws_manager not patched → is_connected returns False
+    dispatched = await _dispatch_due_notifications_impl(session)
+
+    assert dispatched == 0
+    await session.refresh(notif)
+    assert notif.status == "pending"
+
+
+async def test_dispatch_includes_quiz_payload(session: AsyncSession, connected_ws_manager):
+    """When a notification has a quiz, its data is included in the WS payload."""
+    user = await _make_user(session)
     quiz = Quiz(
         user_id=user.id,
         title="Final Quiz",
@@ -351,3 +448,9 @@ async def test_dispatch_includes_quiz_payload(session: AsyncSession):
     assert dispatched == 1
     await session.refresh(notif)
     assert notif.status == "complete"
+
+    # Confirm the quiz payload was included in what was "sent"
+    call_kwargs = connected_ws_manager.call_args
+    payload = call_kwargs.args[1]  # send(user_id, payload)
+    assert payload["quiz"] is not None
+    assert payload["quiz"]["topic"] == "DB Systems"

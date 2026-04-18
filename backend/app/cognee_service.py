@@ -378,6 +378,7 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
 
         if isinstance(chunks, dict):
             chunks = [chunks]
+        log.debug("generate_quiz: got %d chunk(s) for topic=%r", len(chunks), topic)
         if not chunks:
             raise NoDataError(
                 f"no material found for topic: {topic}. "
@@ -390,6 +391,7 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
         if not context_text.strip():
             raise NoDataError(f"chunks for topic '{topic}' had no text content")
         source_ref = _extract_source_ref(chunks[0])
+        log.debug("generate_quiz: context_len=%d source_ref=%r topic=%r", len(context_text), source_ref, topic)
 
         system_prompt = (
             "You generate study quiz items strictly grounded in lecture materials.\n"

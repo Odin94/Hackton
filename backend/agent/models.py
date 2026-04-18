@@ -7,6 +7,7 @@ ScheduleEvent   — lecture / tutorium / study session
 Quiz            — generated quiz linked to one user and optionally many events
 Notification    — delivery record; dispatched via WebSocket when due
 QuizResult      — user's performance on a completed quiz
+ChatMessage     — persisted per-user chat history
 AgentLog        — internal log written by the background LLM agent
 """
 
@@ -14,12 +15,14 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     Column,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
     JSON,
     String,
     Table,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -73,8 +76,11 @@ class User(_Timestamps, Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(256), nullable=False)
-    email: Mapped[str] = mapped_column(String(256), unique=True, index=True, nullable=False)
+    # Primary identifier used for login — must be unique.
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    # Optional profile fields; not required for signup.
+    name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(256), unique=True, index=True, nullable=True)
     phone_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Relationships
@@ -82,6 +88,7 @@ class User(_Timestamps, Base):
     quizzes: Mapped[list["Quiz"]] = relationship(back_populates="user")
     notifications: Mapped[list["Notification"]] = relationship(back_populates="user")
     quiz_results: Mapped[list["QuizResult"]] = relationship(back_populates="user")
+    chat_messages: Mapped[list["ChatMessage"]] = relationship(back_populates="user")
 
 
 class ScheduleEvent(_Timestamps, Base):
@@ -178,6 +185,29 @@ class QuizResult(_Timestamps, Base):
     # Relationships
     user: Mapped["User"] = relationship(back_populates="quiz_results")
     quiz: Mapped["Quiz"] = relationship(back_populates="results")
+
+
+class ChatMessage(Base):
+    """Persisted chat history for one user conversation stream."""
+
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        CheckConstraint("author IN ('user', 'system')", name="ck_chat_messages_author"),
+        UniqueConstraint("user_id", "sequence_number", name="uq_chat_messages_user_sequence"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True, nullable=False, default=_now
+    )
+    author: Mapped[str] = mapped_column(String(16), nullable=False)
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(String, nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="chat_messages")
 
 
 class AgentLog(_Timestamps, Base):

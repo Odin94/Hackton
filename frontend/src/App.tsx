@@ -1,121 +1,311 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
+import { useEffect, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
 import './App.css'
 
+type AuthResponse = {
+  token: string
+  user_id: number
+  username: string
+}
+
+type ChatMessage = {
+  id: number
+  user_id: number
+  timestamp: string
+  author: 'user' | 'system'
+  sequence_number: number
+  content: string
+}
+
+type ChatReplyResponse = {
+  user_message: ChatMessage
+  assistant_message: ChatMessage
+}
+
+const TOKEN_KEY = 'hackton-chat-token'
+const USERNAME_KEY = 'hackton-chat-username'
+
 function App() {
-  const [count, setCount] = useState(0)
+  const [username, setUsername] = useState(() => localStorage.getItem(USERNAME_KEY) ?? '')
+  const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) ?? '')
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [draft, setDraft] = useState('')
+  const [error, setError] = useState('')
+  const [status, setStatus] = useState('Log in with an existing username to load your chat history.')
+  const [isLoggingIn, setIsLoggingIn] = useState(false)
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false)
+  const [isSending, setIsSending] = useState(false)
+  const listRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    localStorage.setItem(USERNAME_KEY, username)
+  }, [username])
+
+  useEffect(() => {
+    if (token) {
+      localStorage.setItem(TOKEN_KEY, token)
+      void loadHistory(token)
+      return
+    }
+
+    localStorage.removeItem(TOKEN_KEY)
+    setMessages([])
+  }, [token])
+
+  useEffect(() => {
+    const list = listRef.current
+    if (!list) {
+      return
+    }
+    list.scrollTop = list.scrollHeight
+  }, [messages])
+
+  async function loadHistory(activeToken: string) {
+    setIsLoadingHistory(true)
+    setError('')
+
+    try {
+      const response = await fetch('/chat/history', {
+        headers: {
+          Authorization: `Bearer ${activeToken}`,
+        },
+      })
+
+      if (!response.ok) {
+        throw new Error(await readError(response, 'Could not load chat history.'))
+      }
+
+      const body = (await response.json()) as { messages: ChatMessage[] }
+      setMessages(body.messages)
+      setStatus(
+        body.messages.length
+          ? 'History loaded from SQLite.'
+          : 'No chat history yet. Ask a question to create the first turn.',
+      )
+    } catch (err) {
+      setMessages([])
+      setToken('')
+      setError(toMessage(err))
+      setStatus('Login token was cleared. Please log in again.')
+    } finally {
+      setIsLoadingHistory(false)
+    }
+  }
+
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    if (!username.trim()) {
+      setError('Enter a username first.')
+      return
+    }
+
+    setIsLoggingIn(true)
+    setError('')
+    setStatus('Logging in...')
+
+    try {
+      const response = await fetch('/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ username: username.trim() }),
+      })
+
+      if (!response.ok) {
+        throw new Error(await readError(response, 'Login failed.'))
+      }
+
+      const body = (await response.json()) as AuthResponse
+      setUsername(body.username)
+      setToken(body.token)
+      setStatus(`Logged in as ${body.username}.`)
+    } catch (err) {
+      setError(toMessage(err))
+      setStatus('Could not log in.')
+    } finally {
+      setIsLoggingIn(false)
+    }
+  }
+
+  async function handleSend(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    if (!token) {
+      setError('Log in before sending a message.')
+      return
+    }
+    if (!draft.trim()) {
+      setError('Write a message first.')
+      return
+    }
+
+    const outgoing = draft.trim()
+    setDraft('')
+    setIsSending(true)
+    setError('')
+    setStatus('Thinking...')
+
+    try {
+      const response = await fetch('/chat/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ content: outgoing }),
+      })
+
+      if (!response.ok) {
+        throw new Error(await readError(response, 'Message failed.'))
+      }
+
+      const body = (await response.json()) as ChatReplyResponse
+      setMessages((current) => [...current, body.user_message, body.assistant_message])
+      setStatus('Response stored in SQLite chat history.')
+    } catch (err) {
+      setDraft(outgoing)
+      setError(toMessage(err))
+      setStatus('The message did not go through.')
+    } finally {
+      setIsSending(false)
+    }
+  }
+
+  function handleLogout() {
+    setToken('')
+    setMessages([])
+    setDraft('')
+    setError('')
+    setStatus('Logged out. Log in again to load chat history.')
+  }
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
+    <main className="app-shell">
+      <section className="hero-panel">
+        <p className="eyebrow">Hackton study chat</p>
+        <h1>Ask the knowledge we already have.</h1>
+        <p className="hero-copy">
+          This tiny UI logs in through <code>/login</code>, loads chat history from SQLite,
+          and sends each message to the backend for a grounded reply from our stored app data
+          and cognee knowledge.
+        </p>
+
+        <form className="login-card" onSubmit={handleLogin}>
+          <label htmlFor="username">Username</label>
+          <div className="login-row">
+            <input
+              id="username"
+              name="username"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="existing username"
+              autoComplete="username"
+            />
+            <button type="submit" disabled={isLoggingIn}>
+              {isLoggingIn ? 'Logging in...' : 'Log in'}
+            </button>
+          </div>
+          <p className="helper-text">
+            {token ? `Authenticated as ${username || 'user'}.` : 'Login only: no signup flow here.'}
           </p>
-        </div>
-        <button
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+        </form>
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
+        <div className="status-card" aria-live="polite">
+          <strong>Status</strong>
+          <p>{status}</p>
+          {error ? <p className="error-text">{error}</p> : null}
         </div>
       </section>
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+      <section className="chat-panel">
+        <header className="chat-header">
+          <div>
+            <p className="eyebrow">Chat history</p>
+            <h2>SQLite-backed conversation</h2>
+          </div>
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={handleLogout}
+            disabled={!token}
+          >
+            Clear session
+          </button>
+        </header>
+
+        <div className="message-list" ref={listRef}>
+          {!token ? (
+            <div className="empty-state">
+              <p>Log in to load your saved chat messages.</p>
+            </div>
+          ) : isLoadingHistory ? (
+            <div className="empty-state">
+              <p>Loading chat history...</p>
+            </div>
+          ) : messages.length === 0 ? (
+            <div className="empty-state">
+              <p>No saved messages yet.</p>
+            </div>
+          ) : (
+            messages.map((message) => (
+              <article
+                key={message.id}
+                className={`message-bubble message-${message.author}`}
+              >
+                <div className="message-meta">
+                  <span>{message.author === 'user' ? username || 'user' : 'system'}</span>
+                  <span>#{message.sequence_number}</span>
+                </div>
+                <p>{message.content}</p>
+              </article>
+            ))
+          )}
+        </div>
+
+        <form className="composer" onSubmit={handleSend}>
+          <label htmlFor="message">Message</label>
+          <textarea
+            id="message"
+            name="message"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            placeholder="Ask about your study notes, diary, quizzes, or schedules..."
+            rows={4}
+            disabled={!token || isSending}
+          />
+          <div className="composer-actions">
+            <p className="helper-text">
+              {token
+                ? 'Each send stores your message and the backend reply.'
+                : 'Login first to enable sending.'}
+            </p>
+            <button type="submit" disabled={!token || isSending}>
+              {isSending ? 'Sending...' : 'Send'}
+            </button>
+          </div>
+        </form>
+      </section>
+    </main>
   )
+}
+
+async function readError(response: Response, fallback: string) {
+  try {
+    const body = (await response.json()) as { detail?: string }
+    return body.detail || fallback
+  } catch {
+    return fallback
+  }
+}
+
+function toMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message
+  }
+
+  return 'Unexpected error.'
 }
 
 export default App

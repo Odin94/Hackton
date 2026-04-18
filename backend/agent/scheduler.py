@@ -68,7 +68,9 @@ async def _llm_checkin_loop() -> None:
         log.info("Scheduler: LLM check-in starting")
         try:
             recent = await read_recent(limit=10)
+            log.debug("Scheduler: LLM check-in fetched %d recent log entries", len(recent))
             messages = await _quiz_llm_call(_LLM_SYSTEM_PROMPT, _build_llm_user_prompt(recent))
+            log.debug("Scheduler: LLM check-in conversation turns=%d", len(messages))
             final = next(
                 (m.get("content") for m in reversed(messages) if m.get("role") == "assistant"),
                 "(no reply)",
@@ -87,10 +89,13 @@ async def _notification_dispatch_loop() -> None:
     log.info("Notification dispatch loop started (interval=%ds)", NOTIFICATION_DISPATCH_INTERVAL)
     while True:
         await asyncio.sleep(NOTIFICATION_DISPATCH_INTERVAL)
+        log.debug("Scheduler: notification dispatch tick")
         try:
             n = await dispatch_due_notifications()
             if n:
                 log.info("Scheduler: dispatched %d notification(s)", n)
+            else:
+                log.debug("Scheduler: no due notifications this tick")
         except Exception:
             log.exception("Scheduler: notification dispatch failed")
 

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cognee_service import NoDataError, generate_quiz as cognee_generate_quiz
 from app.cognee_service import query_materials
+from app.connection_manager import manager as ws_manager
 
 from .database import AsyncSessionLocal
 from .models import Notification, Quiz, ScheduleEvent
@@ -35,6 +36,7 @@ _MINUTES_PER_QUESTION = 2
 
 
 async def _generate_quizzes_impl(user_id: int, session: AsyncSession) -> list[int]:
+    log.debug("generate_quizzes_impl: loading events for user_id=%d", user_id)
     events = (
         await session.execute(
             select(ScheduleEvent).where(ScheduleEvent.user_id == user_id)
@@ -45,15 +47,18 @@ async def _generate_quizzes_impl(user_id: int, session: AsyncSession) -> list[in
         log.info("No schedule events found for user_id=%d", user_id)
         return []
 
+    log.debug("generate_quizzes_impl: found %d event(s) for user_id=%d", len(events), user_id)
     notification_ids: list[int] = []
 
     for event in events:
+        log.debug("Processing event='%s' user_id=%d end=%s", event.name, user_id, event.end_datetime)
         # ------------------------------------------------------------------
         # Cognee query — gracefully degrade if the index is empty
         # ------------------------------------------------------------------
         material_context: str = ""
         try:
             material_context = await query_materials(event.name)
+            log.debug("Cognee material fetched event='%s' context_len=%d", event.name, len(material_context))
         except NoDataError:
             log.info("No cognee material for event '%s' — using topic-only prompt", event.name)
         except Exception:
@@ -62,8 +67,10 @@ async def _generate_quizzes_impl(user_id: int, session: AsyncSession) -> list[in
         # ------------------------------------------------------------------
         # Quiz generation
         # ------------------------------------------------------------------
+        log.debug("Generating quiz for event='%s' has_material=%s", event.name, bool(material_context))
         try:
             quiz_items = await cognee_generate_quiz(topic=event.name)
+            log.debug("Quiz generated event='%s' items=%d", event.name, len(quiz_items))
         except NoDataError:
             log.warning(
                 "Skipping quiz for event '%s': no cognee data available", event.name
@@ -76,16 +83,19 @@ async def _generate_quizzes_impl(user_id: int, session: AsyncSession) -> list[in
         # ------------------------------------------------------------------
         # Persist Quiz
         # ------------------------------------------------------------------
+        duration_mins = max(1, len(quiz_items) * _MINUTES_PER_QUESTION)
+        log.debug("Persisting quiz event='%s' items=%d estimated_duration_minutes=%d", event.name, len(quiz_items), duration_mins)
         quiz = Quiz(
             user_id=user_id,
             title=f"Quiz: {event.name}",
             topic=event.name,
-            estimated_duration_minutes=max(1, len(quiz_items) * _MINUTES_PER_QUESTION),
+            estimated_duration_minutes=duration_mins,
             questions=[item.model_dump() for item in quiz_items],
         )
         quiz.schedule_events.append(event)
         session.add(quiz)
         await session.flush()  # populates quiz.id before we reference it below
+        log.debug("Quiz flushed quiz_id=%d event='%s'", quiz.id, event.name)
 
         # ------------------------------------------------------------------
         # Create Notification — due when the event ends
@@ -103,12 +113,15 @@ async def _generate_quizzes_impl(user_id: int, session: AsyncSession) -> list[in
         session.add(notif)
         await session.flush()
         notification_ids.append(notif.id)
+        log.debug("Notification flushed notification_id=%d quiz_id=%d event='%s'", notif.id, quiz.id, event.name)
         log.info(
             "Created quiz_id=%d notification_id=%d for event '%s'",
             quiz.id, notif.id, event.name,
         )
 
+    log.debug("Committing %d quiz/notification pairs for user_id=%d", len(notification_ids), user_id)
     await session.commit()
+    log.debug("Commit complete; notification_ids=%s", notification_ids)
     return notification_ids
 
 
@@ -132,11 +145,13 @@ async def generate_quizzes_for_user_events(user_id: int) -> list[int]:
 
 
 async def _dispatch_due_notifications_impl(session: AsyncSession) -> int:
-    """Mark due pending notifications as complete and (mock) send via WebSocket.
+    """Send due pending notifications over WebSocket and mark them complete.
 
-    Returns the number of notifications dispatched.
+    Notifications for offline users are left pending and retried on the next
+    scheduler tick.  Returns the number of notifications actually dispatched.
     """
     now = datetime.now(UTC)
+    log.debug("dispatch_due_notifications: querying due notifications at now=%s", now.isoformat())
 
     due = (
         await session.execute(
@@ -146,20 +161,19 @@ async def _dispatch_due_notifications_impl(session: AsyncSession) -> int:
         )
     ).scalars().all()
 
+    log.debug("dispatch_due_notifications: found %d due notification(s)", len(due))
     dispatched = 0
     for notif in due:
-        # ------------------------------------------------------------------
-        # TODO: Check for an active WebSocket connection for notif.user_id.
-        #
-        #   ws = websocket_manager.get_connection(notif.user_id)
-        #   if ws is None:
-        #       continue   # user is offline — retry next tick
-        #
-        # ------------------------------------------------------------------
+        # Skip if the user has no active WebSocket connection — retry next tick.
+        if not ws_manager.is_connected(notif.user_id):
+            log.debug(
+                "Notification id=%d deferred — user_id=%d not connected",
+                notif.id, notif.user_id,
+            )
+            continue
 
         quiz_payload: dict | None = None
         if notif.quiz_id is not None:
-            # Eagerly load the quiz within the same session
             quiz = await session.get(Quiz, notif.quiz_id)
             if quiz is not None:
                 quiz_payload = {
@@ -170,20 +184,28 @@ async def _dispatch_due_notifications_impl(session: AsyncSession) -> int:
                     "questions": quiz.questions,
                 }
 
-        # ------------------------------------------------------------------
-        # TODO: Replace the log line below with the actual WebSocket send:
-        #
-        #   await ws.send_json({"content": notif.content, "quiz": quiz_payload})
-        #
-        # ------------------------------------------------------------------
-        log.info(
-            "MOCK WS → user_id=%d notification_id=%d content=%r quiz_id=%s",
+        sent = await ws_manager.send(
             notif.user_id,
-            notif.id,
-            notif.content,
-            notif.quiz_id,
+            {
+                "type": "notification",
+                "notification_id": notif.id,
+                "content": notif.content,
+                "quiz": quiz_payload,
+            },
         )
 
+        if not sent:
+            # Race: connection dropped between is_connected() and send()
+            log.warning(
+                "WS send failed (race) for user_id=%d notification_id=%d — will retry",
+                notif.user_id, notif.id,
+            )
+            continue
+
+        log.info(
+            "WS notification sent → user_id=%d notification_id=%d",
+            notif.user_id, notif.id,
+        )
         notif.status = "complete"
         dispatched += 1
 

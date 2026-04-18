@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 
 async def init_db() -> None:
-    """Bootstrap: create tables that don't exist yet."""
+    """Bootstrap: apply additive schema changes and create missing tables."""
     await create_all_tables()
 
 
