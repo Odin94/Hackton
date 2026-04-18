@@ -40,6 +40,39 @@ _RETRYABLE_CLASSES: tuple[type[BaseException], ...] = (
 _RETRYABLE_MARKERS = ("timeout", "timed out", "rate limit", "429", "503", "502")
 
 
+def _chunk_text(chunk: object) -> str:
+    """Extract the text field from a cognee chunk payload.
+
+    Cognee's ChunksRetriever returns vector-store payloads — normally dicts with
+    a `text` key, but community vector engines occasionally hand back objects
+    with `.text` instead. Accept both, silently skip the rest.
+    """
+    if isinstance(chunk, dict):
+        return str(chunk.get("text", ""))
+    return str(getattr(chunk, "text", ""))
+
+
+def _extract_source_ref(chunk: object) -> str | None:
+    """Pull the originating document name from a chunk, if present.
+
+    `is_part_of` may be: a dict (typical qdrant/lance payload), a pydantic-like
+    object (if the vector engine returns typed DataPoints), or a bare string
+    (some configs store just the document name). Return None if none apply.
+    """
+    if isinstance(chunk, dict):
+        part = chunk.get("is_part_of")
+    else:
+        part = getattr(chunk, "is_part_of", None)
+
+    if isinstance(part, dict):
+        name = part.get("name")
+        return str(name) if name else None
+    if isinstance(part, str):
+        return part or None
+    name = getattr(part, "name", None)
+    return str(name) if name else None
+
+
 def _wrap(exc: Exception) -> CogneeServiceError:
     msg = f"{type(exc).__name__}: {exc}"
     retryable = isinstance(exc, _RETRYABLE_CLASSES) or any(
@@ -163,19 +196,19 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
         raise CogneeServiceError(f"no material found for topic: {topic}")
 
     context_text = "\n\n---\n\n".join(
-        str(c.get("text", "")) for c in chunks if isinstance(c, dict)
+        str(_chunk_text(c)) for c in chunks if _chunk_text(c)
     )
-    top_chunk = chunks[0] if isinstance(chunks[0], dict) else {}
-    source_ref = None
-    is_part_of = top_chunk.get("is_part_of") if isinstance(top_chunk, dict) else None
-    if isinstance(is_part_of, dict):
-        source_ref = is_part_of.get("name")
+    source_ref = _extract_source_ref(chunks[0])
 
     system_prompt = (
-        "You generate study quiz Q&A grounded strictly in the provided context. "
-        "Return JSON matching the schema: {\"items\":[{\"question\":str,\"answer\":str},...]}. "
-        f"Produce exactly {n} items. Questions must be answerable from the context; "
-        "answers must be concise and factual."
+        "You generate study quiz items strictly grounded in the provided context.\n"
+        "Rules:\n"
+        "1. Every question must be answerable from the context alone — no outside knowledge.\n"
+        "2. Mix question types: definitional, mechanism, application, comparison.\n"
+        "3. Avoid trivial restatement ('What does the context say about X?'). Test understanding.\n"
+        "4. Answers must be 1–2 sentences, factual, self-contained.\n"
+        f"5. Return exactly {n} items.\n"
+        "Output JSON: {\"items\":[{\"question\":str,\"answer\":str}, ...]}."
     )
     user_prompt = f"Topic: {topic}\n\nContext:\n{context_text}"
 

@@ -309,6 +309,73 @@ async def test_generate_quiz_source_ref_none_when_missing(mock_cognee, mock_lite
     assert items[0].source_ref is None
 
 
+class _FakeDoc:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeChunk:
+    def __init__(self, text: str, doc_name: str) -> None:
+        self.text = text
+        self.is_part_of = _FakeDoc(doc_name)
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_handles_pydantic_like_chunks(mock_cognee, mock_litellm):
+    """Vector engines may return typed objects instead of dicts — extract by attribute."""
+    mock_cognee.search.return_value = [_FakeChunk("object-shaped chunk", "typed.md")]
+    items = await cognee_service.generate_quiz("topic", n=1)
+    assert items[0].source_ref == "typed.md"
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_handles_string_is_part_of(mock_cognee, mock_litellm):
+    """Some cognee configs store is_part_of as a plain name string."""
+    mock_cognee.search.return_value = [
+        {"text": "text", "is_part_of": "flat-name.md"}
+    ]
+    items = await cognee_service.generate_quiz("topic", n=1)
+    assert items[0].source_ref == "flat-name.md"
+
+
+# ----- _chunk_text / _extract_source_ref direct unit tests ----------------
+
+def test_chunk_text_from_dict():
+    assert cognee_service._chunk_text({"text": "hello"}) == "hello"
+
+
+def test_chunk_text_from_object():
+    class C:
+        text = "from attr"
+    assert cognee_service._chunk_text(C()) == "from attr"
+
+
+def test_chunk_text_missing_returns_empty():
+    assert cognee_service._chunk_text({"other": "x"}) == ""
+    assert cognee_service._chunk_text(object()) == ""
+
+
+def test_extract_source_ref_dict_form():
+    chunk = {"is_part_of": {"name": "doc.md"}}
+    assert cognee_service._extract_source_ref(chunk) == "doc.md"
+
+
+def test_extract_source_ref_string_form():
+    chunk = {"is_part_of": "doc.md"}
+    assert cognee_service._extract_source_ref(chunk) == "doc.md"
+
+
+def test_extract_source_ref_object_form():
+    chunk = _FakeChunk("t", "doc.md")
+    assert cognee_service._extract_source_ref(chunk) == "doc.md"
+
+
+def test_extract_source_ref_missing_returns_none():
+    assert cognee_service._extract_source_ref({}) is None
+    assert cognee_service._extract_source_ref({"is_part_of": ""}) is None
+    assert cognee_service._extract_source_ref({"is_part_of": None}) is None
+
+
 @pytest.mark.asyncio
 async def test_generate_quiz_truncates_over_n(mock_cognee, mock_litellm):
     mock_cognee.search.return_value = _chunks_with_source()
