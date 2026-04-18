@@ -888,6 +888,7 @@ body::after {
 .message-meta {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 16px;
   margin-bottom: 6px;
   font-size: 0.7rem;
@@ -895,6 +896,12 @@ body::after {
   letter-spacing: 0.08em;
   color: var(--fg-faint);
   font-weight: 600;
+}
+
+.message-meta-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .message-time {
@@ -1325,6 +1332,13 @@ button {
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 14px;
+}
+
+.quiz-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .quiz-progress {

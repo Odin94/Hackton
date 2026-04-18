@@ -67,7 +67,7 @@ type OverviewResp = {
 const TOKEN_KEY = 'tumtum-demo-token'
 
 const SCENE_B_USER_LINE =
-  "hmm yeah, the powerset thing got away from me. got time for a reset?"
+  "hmm yeah, the powerset concept got away from me. got time for a quick review?"
 const SCENE_G_USER_LINE =
   "yeah actually feeling way better. i'll hit the library this afternoon."
 
@@ -77,8 +77,84 @@ const TYPING_MS_PER_CHAR = 18
 const POST_USER_GAP_MS = 1800
 const POST_BUBBLE_BREATH_MS = 1400
 
+const SCENE_BC_LIVE_TIMEOUT_MS = 10_000
+const SCENE_D_QUIZ_GRACE_MS = 500
+const SCENE_D_QUIZ_TOPIC = 'powerset construction NFA DFA epsilon closures'
+
 function typingDurationMs(text: string): number {
   return Math.max(600, text.length * TYPING_MS_PER_CHAR)
+}
+
+async function liveOrFallback<T>(
+  live: Promise<T>,
+  fallback: T,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => {
+      console.warn(`[${label}] live timed out after ${timeoutMs}ms, using fallback`)
+      resolve(fallback)
+    }, timeoutMs)
+  })
+  try {
+    return await Promise.race([live, timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+type BackendQuizItem = {
+  question: string
+  answer: string
+  options: string[]
+  correct_index: number
+  topic: string
+  source_ref: string | null
+}
+
+async function fetchLiveQuiz(
+  token: string,
+  topic: string,
+  n: number,
+): Promise<DemoQuizQuestion[]> {
+  const response = await fetch('/quiz', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ topic, n }),
+  })
+  if (!response.ok) {
+    throw new Error(`quiz ${response.status}`)
+  }
+  const body = (await response.json()) as { items?: BackendQuizItem[] }
+  const items = body.items ?? []
+  if (items.length < n) {
+    throw new Error(`quiz returned ${items.length}/${n} items`)
+  }
+  return items.slice(0, n).map((item, idx) => {
+    if (
+      typeof item.question !== 'string' ||
+      !Array.isArray(item.options) ||
+      item.options.length !== 4 ||
+      !item.options.every((o) => typeof o === 'string') ||
+      typeof item.correct_index !== 'number' ||
+      item.correct_index < 0 ||
+      item.correct_index > 3
+    ) {
+      throw new Error(`quiz item ${idx} shape invalid`)
+    }
+    return {
+      question: item.question,
+      options: item.options as [string, string, string, string],
+      correct_index: item.correct_index,
+      explanation: item.answer || 'Grounded in the course materials.',
+      source_ref: item.source_ref ?? 'Lecture materials',
+    }
+  })
 }
 
 function App() {
@@ -91,6 +167,12 @@ function App() {
   const [isSending, setIsSending] = useState(false)
   const [isAutoRunning, setIsAutoRunning] = useState(false)
   const [overview, setOverview] = useState<OverviewResp | null>(null)
+  const [activeQuiz, setActiveQuiz] = useState<{
+    title: string
+    topic: string
+    questions: DemoQuizQuestion[]
+  }>(FALLBACK_QUIZ)
+  const [activeQuizIsLive, setActiveQuizIsLive] = useState(false)
   const listRef = useRef<HTMLDivElement | null>(null)
   const quizDoneResolverRef = useRef<(() => void) | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
@@ -230,38 +312,20 @@ function App() {
     return response
   }
 
-  async function sendScriptedTurn(userContent: string, systemContent: string) {
-    const response = await postJSON('/demo/scripted-turn', {
-      user_content: userContent,
-      system_content: systemContent,
-    })
-    const body = (await response.json()) as {
-      user_message: ChatMessage
-      assistant_message: ChatMessage
-    }
-    setMessages((current) =>
-      current.some((m) => m.id === body.user_message.id)
-        ? current
-        : [...current, body.user_message],
-    )
-    await sleep(typingDurationMs(userContent) + POST_USER_GAP_MS)
-    setMessages((current) =>
-      current.some((m) => m.id === body.assistant_message.id)
-        ? current
-        : [...current, body.assistant_message],
-    )
-  }
-
   async function sendSystemMessage(content: string) {
     await postJSON('/demo/system-message', { content })
   }
 
-  async function saveQuizResults(correctCount: number, total: number) {
+  async function saveQuizResults(
+    quiz: { title: string; topic: string; questions: DemoQuizQuestion[] },
+    correctCount: number,
+    total: number,
+  ) {
     await postJSON('/demo/quiz-results', {
-      title: FALLBACK_QUIZ.title,
-      topic: FALLBACK_QUIZ.topic,
+      title: quiz.title,
+      topic: quiz.topic,
       estimated_duration_minutes: 5,
-      questions: FALLBACK_QUIZ.questions,
+      questions: quiz.questions,
       correct_answers: correctCount,
       false_answers: total - correctCount,
     })
@@ -274,15 +338,91 @@ function App() {
     setIsAutoRunning(true)
     try {
       await waitForSocketOpen()
-      setStatus('Scene A — TumTum proactive ping')
+
+      // Kick off cognee quiz prefetch now so it has ~40s to resolve before Scene D.
+      const liveQuizPromise = fetchLiveQuiz(token, SCENE_D_QUIZ_TOPIC, 3).catch((err) => {
+        console.warn('[Scene D] live quiz prefetch failed:', err)
+        return null
+      })
+
+      setStatus('Scene A · scripted — proactive ping')
       await sendSystemMessage(SCENE_A_PING)
       await sleep(typingDurationMs(SCENE_A_PING) + POST_BUBBLE_BREATH_MS)
 
-      setStatus('Scene B + C — Odin asks, TumTum replies')
-      await sendScriptedTurn(SCENE_B_USER_LINE, SCENE_C_REPLY)
-      await sleep(typingDurationMs(SCENE_C_REPLY) + POST_BUBBLE_BREATH_MS)
+      setStatus('Scene B+C · LIVE LLM + cognee — powerset Q')
+      // Fire the live LLM call BEFORE typing the user bubble so latency hides
+      // behind the typing + gap animation (~3s).
+      const liveChatPromise = postJSON('/chat/messages', { content: SCENE_B_USER_LINE })
+        .then((r) => r.json() as Promise<ChatReplyResponse>)
+        .catch((err) => {
+          console.warn('[Scene B+C] /chat/messages failed:', err)
+          return null
+        })
 
-      setStatus('Scene D — 3-question MC quiz')
+      // Show the user bubble optimistically (client-side temp) so typing starts now.
+      const tempUserMsg: ChatMessage = {
+        id: -Date.now(),
+        user_id: 0,
+        timestamp: new Date().toISOString(),
+        author: 'user',
+        sequence_number: 0,
+        content: SCENE_B_USER_LINE,
+      }
+      setMessages((current) => [...current, tempUserMsg])
+      await sleep(typingDurationMs(SCENE_B_USER_LINE) + POST_USER_GAP_MS)
+
+      setIsSending(true)
+      const liveBody = await liveOrFallback(
+        liveChatPromise,
+        null,
+        SCENE_BC_LIVE_TIMEOUT_MS,
+        'scene-bc',
+      )
+      setIsSending(false)
+
+      if (liveBody && liveBody.assistant_message?.content) {
+        setMessages((current) =>
+          current.some((m) => m.id === liveBody.assistant_message.id)
+            ? current
+            : [...current, liveBody.assistant_message],
+        )
+        await sleep(
+          typingDurationMs(liveBody.assistant_message.content) + POST_BUBBLE_BREATH_MS,
+        )
+      } else {
+        setStatus('Scene B+C · fallback scripted — LLM unreachable')
+        const fallbackReply: ChatMessage = {
+          id: -Date.now() - 1,
+          user_id: 0,
+          timestamp: new Date().toISOString(),
+          author: 'system',
+          sequence_number: 0,
+          content: SCENE_C_REPLY,
+        }
+        setMessages((current) => [...current, fallbackReply])
+        await sleep(typingDurationMs(SCENE_C_REPLY) + POST_BUBBLE_BREATH_MS)
+      }
+
+      const resolvedQuiz = await liveOrFallback(
+        liveQuizPromise,
+        null,
+        SCENE_D_QUIZ_GRACE_MS,
+        'scene-d',
+      )
+      const nextQuiz = resolvedQuiz
+        ? {
+            title: FALLBACK_QUIZ.title,
+            topic: FALLBACK_QUIZ.topic,
+            questions: resolvedQuiz,
+          }
+        : FALLBACK_QUIZ
+      setActiveQuiz(nextQuiz)
+      setActiveQuizIsLive(resolvedQuiz != null)
+      setStatus(
+        resolvedQuiz
+          ? 'Scene D · LIVE cognee quiz — powerset drill'
+          : 'Scene D · scripted fallback — cognee unreachable',
+      )
       setQuizAutoPlay(true)
       setQuizOpen(true)
       const quizDone = new Promise<void>((resolve) => {
@@ -291,14 +431,14 @@ function App() {
       await quizDone
 
       const recap = `${SCENE_E_RECAP_PREFIX}?/?${SCENE_E_RECAP_BODY}`
-      setStatus('Scene E — performance recap (auto-fires from quiz)')
+      setStatus('Scene E · scripted — performance recap')
       await sleep(typingDurationMs(recap) + POST_BUBBLE_BREATH_MS)
 
-      setStatus('Scene F — mood check-in')
+      setStatus('Scene F · scripted — mood check-in')
       await sendSystemMessage(SCENE_F_MOOD_PING)
       await sleep(typingDurationMs(SCENE_F_MOOD_PING) + POST_BUBBLE_BREATH_MS)
 
-      setStatus('Scene G — live LLM adaptive reply')
+      setStatus('Scene G · LIVE LLM — adaptive reply')
       const live = SCENE_G_USER_LINE
       setIsSending(true)
       try {
@@ -383,11 +523,11 @@ function App() {
       setQuizAutoPlay(false)
       const correctCount = answers.reduce(
         (acc, choice, idx) =>
-          acc + (choice === FALLBACK_QUIZ.questions[idx].correct_index ? 1 : 0),
+          acc + (choice === activeQuiz.questions[idx].correct_index ? 1 : 0),
         0,
       )
       try {
-        await saveQuizResults(correctCount, answers.length)
+        await saveQuizResults(activeQuiz, correctCount, answers.length)
         setStatus(`Quiz saved: ${correctCount}/${answers.length}`)
         void refreshOverview()
       } catch (err) {
@@ -405,7 +545,7 @@ function App() {
       quizDoneResolverRef.current = null
       resolver?.()
     },
-    [token, refreshOverview],
+    [token, refreshOverview, activeQuiz],
   )
 
   return (
@@ -443,11 +583,19 @@ function App() {
                   className={`message-bubble message-${message.author}`}
                 >
                   <div className="message-meta">
-                    <span>{message.author === 'user' ? DEMO_USERNAME : 'tumtum'}</span>
-                    <span className="message-time">
-                      {formatTime(message.timestamp)}
-                      {message.processing_ms != null ? ` · ${message.processing_ms} ms` : ''}
+                    <span className="message-meta-lead">
+                      <span>{message.author === 'user' ? DEMO_USERNAME : 'tumtum'}</span>
+                      {message.author === 'system' ? (
+                        message.processing_ms != null ? (
+                          <Badge variant="success">
+                            LIVE LLM · {message.processing_ms} ms
+                          </Badge>
+                        ) : (
+                          <Badge variant="muted">scripted</Badge>
+                        )
+                      ) : null}
                     </span>
+                    <span className="message-time">{formatTime(message.timestamp)}</span>
                   </div>
                   <TypingText
                     content={message.content}
@@ -489,8 +637,9 @@ function App() {
 
       {quizOpen ? (
         <QuizOverlay
-          questions={FALLBACK_QUIZ.questions}
-          title={FALLBACK_QUIZ.title}
+          questions={activeQuiz.questions}
+          title={activeQuiz.title}
+          isLive={activeQuizIsLive}
           autoPlay={quizAutoPlay}
           onClose={() => {
             setQuizOpen(false)
@@ -574,6 +723,7 @@ const MOCK_TOPIC_FOCUS: {
   { topic: 'Powerset construction', course: 'DS', mastery: 62, trend: 'up' },
   { topic: 'ε-closures', course: 'DS', mastery: 78, trend: 'up' },
   { topic: 'Rekursion (H5)', course: 'EInf', mastery: 44, trend: 'flat' },
+  { topic: 'Reihen-Konvergenz', course: 'Analysis', mastery: 58, trend: 'up' },
   { topic: 'Chomsky hierarchy', course: 'DS', mastery: 81, trend: 'up' },
 ]
 
@@ -593,6 +743,7 @@ const MOCK_QUICK_ACTIONS = [
 const MOCK_COURSES: OverviewCourse[] = [
   { id: -1, name: 'Diskrete Strukturen' },
   { id: -2, name: 'Einführung in die Informatik' },
+  { id: -3, name: 'Analysis für Informatik' },
 ]
 
 const MOCK_EVENTS: OverviewEvent[] = [
@@ -620,6 +771,14 @@ const MOCK_EVENTS: OverviewEvent[] = [
     start_datetime: '2025-11-19T09:30:00Z',
     end_datetime: '2025-11-19T11:00:00Z',
   },
+  {
+    id: -4,
+    course_name: 'Analysis für Informatik',
+    type: 'Lecture',
+    name: 'Analysis · Potenzreihen',
+    start_datetime: '2025-11-18T10:00:00Z',
+    end_datetime: '2025-11-18T12:00:00Z',
+  },
 ]
 
 const MOCK_DEADLINES: OverviewDeadline[] = [
@@ -634,6 +793,12 @@ const MOCK_DEADLINES: OverviewDeadline[] = [
     course_name: 'Einführung in die Informatik',
     name: 'EInf H5 (Rekursion)',
     datetime: '2025-11-20T23:59:00Z',
+  },
+  {
+    id: -3,
+    course_name: 'Analysis für Informatik',
+    name: 'Analysis Übungsblatt 5',
+    datetime: '2025-11-21T23:59:00Z',
   },
 ]
 
@@ -862,12 +1027,20 @@ function SidebarSection({
 type QuizOverlayProps = {
   questions: DemoQuizQuestion[]
   title: string
+  isLive?: boolean
   autoPlay?: boolean
   onClose: () => void
   onComplete: (answers: number[]) => void
 }
 
-function QuizOverlay({ questions, title, autoPlay, onClose, onComplete }: QuizOverlayProps) {
+function QuizOverlay({
+  questions,
+  title,
+  isLive = false,
+  autoPlay,
+  onClose,
+  onComplete,
+}: QuizOverlayProps) {
   const [index, setIndex] = useState(0)
   const [answers, setAnswers] = useState<number[]>([])
   const [selected, setSelected] = useState<number | null>(null)
@@ -936,7 +1109,14 @@ function QuizOverlay({ questions, title, autoPlay, onClose, onComplete }: QuizOv
     <div className="quiz-backdrop" role="dialog" aria-modal="true">
       <div className="quiz-card">
         <header className="quiz-header">
-          <p className="eyebrow">{title}</p>
+          <div className="quiz-title-row">
+            <p className="eyebrow">{title}</p>
+            {isLive ? (
+              <Badge variant="success">LIVE · cognee</Badge>
+            ) : (
+              <Badge variant="muted">scripted fallback</Badge>
+            )}
+          </div>
           <button type="button" className="ghost-button" onClick={onClose} disabled={autoPlay}>
             Close
           </button>

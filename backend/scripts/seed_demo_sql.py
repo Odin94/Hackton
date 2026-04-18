@@ -36,6 +36,7 @@ DEMO_EMAIL = "odin@example.com"
 COURSES = [
     "Einführung in die Informatik",
     "Diskrete Strukturen",
+    "Analysis für Informatik",
 ]
 
 
@@ -83,6 +84,7 @@ async def _seed_schedule(session, user_id: int, courses: dict[str, Course]) -> N
     'upcoming deadlines/events' in the LLM context show something real."""
     ds = courses["Diskrete Strukturen"]
     einf = courses["Einführung in die Informatik"]
+    anal = courses["Analysis für Informatik"]
 
     events = [
         # Recent past lectures (drives the 'revise' framing for the demo).
@@ -104,12 +106,24 @@ async def _seed_schedule(session, user_id: int, courses: dict[str, Course]) -> N
             start_datetime=_dt(2025, 11, 12, 14, 0),
             end_datetime=_dt(2025, 11, 12, 16, 0),
         ),
+        ScheduleEvent(
+            user_id=user_id, course_id=anal.id,
+            type="lecture", name="Analysis: Reihen & Konvergenztests",
+            start_datetime=_dt(2025, 11, 11, 10, 0),
+            end_datetime=_dt(2025, 11, 11, 12, 0),
+        ),
         # Upcoming — demo sees these as "next 7 days" when clock is 2025-11-14.
         ScheduleEvent(
             user_id=user_id, course_id=ds.id,
             type="tutorium", name="DS: Übung Automaten",
             start_datetime=_dt(2025, 11, 17, 14, 0),
             end_datetime=_dt(2025, 11, 17, 16, 0),
+        ),
+        ScheduleEvent(
+            user_id=user_id, course_id=anal.id,
+            type="lecture", name="Analysis: Potenzreihen",
+            start_datetime=_dt(2025, 11, 18, 10, 0),
+            end_datetime=_dt(2025, 11, 18, 12, 0),
         ),
         ScheduleEvent(
             user_id=user_id, course_id=einf.id,
@@ -131,6 +145,10 @@ async def _seed_schedule(session, user_id: int, courses: dict[str, Course]) -> N
             user_id=user_id, course_id=einf.id, name="EInf Abgabe H5",
             datetime=_dt(2025, 11, 20, 23, 59),
         ),
+        Deadline(
+            user_id=user_id, course_id=anal.id, name="Analysis Übungsblatt 5",
+            datetime=_dt(2025, 11, 21, 23, 59),
+        ),
     ]
     for d in deadlines:
         session.add(d)
@@ -144,15 +162,18 @@ async def _seed_quiz_history(session, user_id: int, courses: dict[str, Course]) 
     progress, not a static snapshot."""
     ds = courses["Diskrete Strukturen"]
     einf = courses["Einführung in die Informatik"]
+    anal = courses["Analysis für Informatik"]
 
     # (course, title, topic, taken_at, correct, false)
     arc: list[tuple[Course, str, str, datetime, int, int]] = [
         (einf, "EInf: Grundlagen Check", "Python Grundlagen", _dt(2025, 9, 25), 3, 2),
         (ds, "DS: Aussagenlogik", "Aussagenlogik, Tautologien", _dt(2025, 10, 2), 3, 2),
         (einf, "EInf: Listen & Rekursion", "Rekursion, Listen", _dt(2025, 10, 8), 4, 1),
+        (anal, "Analysis: Folgen-Grundlagen", "Folgen, Konvergenz, epsilon-N", _dt(2025, 10, 16), 3, 2),
         (ds, "DS: Mengenlehre", "Mengen, Relationen", _dt(2025, 10, 22), 4, 1),
         (einf, "EInf: Datenstrukturen", "Arrays, Hashmaps", _dt(2025, 10, 28), 4, 1),
         (ds, "DS: Chomsky-Hierarchie", "Chomsky-Hierarchie, reguläre Sprachen", _dt(2025, 11, 3), 4, 1),
+        (anal, "Analysis: Reihen-Konvergenz", "Reihen, Konvergenztests", _dt(2025, 11, 11, 18), 4, 1),
         (ds, "DS: DFA-Konstruktion", "DFA, endliche Automaten", _dt(2025, 11, 13, 17), 4, 1),
     ]
 
@@ -196,14 +217,16 @@ async def _seed_quiz_history(session, user_id: int, courses: dict[str, Course]) 
 _CHAT_ARC: list[tuple[datetime, str, str]] = [
     (_dt(2025, 9, 22, 9, 15), "user", "Hi, I'm Odin. First semester CS at TUM. Bit nervous."),
     (_dt(2025, 9, 22, 9, 16), "system", "Hey Odin, welcome! Let's set you up. Which courses are you taking this term?"),
-    (_dt(2025, 9, 22, 9, 18), "user", "Einführung in die Informatik and Diskrete Strukturen."),
-    (_dt(2025, 9, 22, 9, 18), "system", "Great — got both saved. I'll help you stay on top of them. Shout whenever you want to check in after a lecture or need a quiz."),
+    (_dt(2025, 9, 22, 9, 18), "user", "Einführung in die Informatik, Diskrete Strukturen, and Analysis für Informatik."),
+    (_dt(2025, 9, 22, 9, 18), "system", "Great — all three saved. I'll help you stay on top of them. Shout whenever you want to check in after a lecture or need a quiz."),
     (_dt(2025, 9, 25, 19, 40), "user", "Did my first EInf quiz — 3/5. Rough."),
     (_dt(2025, 9, 25, 19, 41), "system", "First week, totally normal. You came in cold on Python — what tripped you up most?"),
     (_dt(2025, 9, 25, 19, 43), "user", "List slicing and some loop edge cases. I think I get it now after redoing the exercises."),
     (_dt(2025, 9, 25, 19, 44), "system", "Good. Redo is the right move. Let's revisit slicing in a week to see if it stuck."),
     (_dt(2025, 10, 3, 21, 10), "user", "DS lecture today on sets/relations was dense but cool."),
     (_dt(2025, 10, 3, 21, 11), "system", "That one usually clicks in retrospect — the relations stuff comes back everywhere."),
+    (_dt(2025, 10, 15, 18, 30), "user", "Analysis exercise session was rough — I'm behind on proof mechanics."),
+    (_dt(2025, 10, 15, 18, 31), "system", "Expected — your head start was on CS topics, not Analysis. Closing the gap now beats closing it in January."),
     (_dt(2025, 10, 17, 22, 5), "user", "Low-energy day. Skipped my evening study block."),
     (_dt(2025, 10, 17, 22, 6), "system", "Noted. One skipped block isn't a pattern — rest is part of the plan. See how tomorrow feels."),
     (_dt(2025, 10, 24, 18, 20), "user", "Two-week streak of getting sleep before midnight. Quiz scores noticeably sharper."),
