@@ -252,10 +252,12 @@ name = "backend"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "aiosqlite" },
     { name = "cognee" },
     { name = "fastapi", extra = ["standard"] },
     { name = "litellm" },
     { name = "pydantic-settings" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 
 [package.dev-dependencies]
@@ -268,10 +270,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.19" },
     { name = "cognee", specifier = "==1.0.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.136.0" },
     { name = "litellm", specifier = ">=1.50" },
     { name = "pydantic-settings", specifier = ">=2.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
 ]
 
 [package.metadata.requires-dev]

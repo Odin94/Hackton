@@ -9,6 +9,8 @@ dependencies = [
     "cognee==1.0.0",
     "pydantic-settings>=2.0",
     "litellm>=1.50",
+    "sqlalchemy[asyncio]>=2.0",
+    "aiosqlite>=0.19",
 ]
 
 [dependency-groups]
