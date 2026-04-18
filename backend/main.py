@@ -11,10 +11,12 @@ from app.routes_cognee import router as cognee_router
 from app.routes_auth import router as auth_router
 from app.routes_chat import router as chat_router
 from app.routes_demo import router as demo_router
+from app.routes_events import router as events_router
 from app.routes_ws import router as ws_router
 from agent.db import init_db
 from agent.scheduler import start_scheduler
 from app.demo_time import install_demo_clock
+from app.scraper import ensure_default_targets, scrape_stale_targets
 
 # Apply demo-clock monkey-patch AFTER all app modules have imported datetime.
 # Every `from datetime import datetime` inside those modules becomes a module-
@@ -51,6 +53,10 @@ _log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     await _init_cognee_db()
     await init_db()
+    await ensure_default_targets()
+    # Scrape stale targets in the background — don't block startup
+    import asyncio as _asyncio
+    _asyncio.create_task(scrape_stale_targets())
     if settings.disable_scheduler:
         log.info("Scheduler disabled via DISABLE_SCHEDULER — demo mode")
         yield
@@ -72,4 +78,5 @@ app.include_router(auth_router)
 app.include_router(ws_router)
 app.include_router(chat_router)
 app.include_router(demo_router)
+app.include_router(events_router)
 app.include_router(cognee_router)

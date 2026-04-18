@@ -394,6 +394,160 @@ def test_post_chat_message_adds_courses_and_deadline(
     assert notifications[0].status == "complete"
 
 
+def test_add_deadlines_queues_profile_question_when_onboarding_reaches_final_step(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = client.post("/signup", json={"username": "profile_prompt_user"})
+    assert response.status_code == 200
+    token = response.json()["token"]
+    user_id = response.json()["user_id"]
+
+    async def _seed_course() -> int:
+        async with client.factory() as session:  # type: ignore[attr-defined]
+            course = Course(user_id=user_id, name="Algorithms")
+            session.add(course)
+            await session.commit()
+            await session.refresh(course)
+            return course.id
+
+    course_id = asyncio.run(_seed_course())
+
+    monkeypatch.setattr(chat_service, "_build_cognee_context", AsyncMock(return_value="materials"))
+    monkeypatch.setattr(
+        chat_service.litellm,
+        "acompletion",
+        AsyncMock(
+            side_effect=[
+                _tool_response(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tool-1",
+                            function=SimpleNamespace(
+                                name="add_deadlines",
+                                arguments=(
+                                    '{"deadlines":['
+                                    f'{{"course_id":{course_id},"name":"Algorithms exam",'
+                                    '"datetime":"2026-05-10T09:00:00+02:00"}'
+                                    "]}"
+                                ),
+                            ),
+                        )
+                    ]
+                ),
+                _tool_response(
+                    content=(
+                        "I added your deadline. Last onboarding question: what are your "
+                        "interests, and what are your goals for the future?"
+                    )
+                ),
+            ]
+        ),
+    )
+
+    deadlines_response = client.post(
+        "/chat/messages",
+        json={"content": "Algorithms exam is on 2026-05-10 at 09:00."},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert deadlines_response.status_code == 200
+
+    async def _load_notifications() -> list[Notification]:
+        async with client.factory() as session:  # type: ignore[attr-defined]
+            rows = await session.execute(
+                select(Notification)
+                .where(Notification.user_id == user_id)
+                .order_by(Notification.id.asc())
+            )
+            return list(rows.scalars().all())
+
+    notifications = asyncio.run(_load_notifications())
+    assert notifications[-1].status == "pending"
+    assert "what are your interests, and what are your goals for the future" in notifications[-1].content.lower()
+
+
+def test_post_chat_message_saves_user_interests_and_future_goals(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = client.post("/signup", json={"username": "profile_save_user"})
+    assert response.status_code == 200
+    token = response.json()["token"]
+    user_id = response.json()["user_id"]
+
+    async def _seed_profile_prompt() -> None:
+        async with client.factory() as session:  # type: ignore[attr-defined]
+            session.add(
+                Notification(
+                    user_id=user_id,
+                    status="pending",
+                    target_datetime=chat_service.datetime.now(chat_service.UTC),
+                    content=(
+                        "Last onboarding question: what are your interests, and what are your "
+                        "goals for the future? I'll save that to your profile."
+                    ),
+                    quiz_id=None,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(_seed_profile_prompt())
+
+    monkeypatch.setattr(chat_service, "_build_cognee_context", AsyncMock(return_value="materials"))
+    monkeypatch.setattr(
+        chat_service.litellm,
+        "acompletion",
+        AsyncMock(
+            side_effect=[
+                _tool_response(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tool-1",
+                            function=SimpleNamespace(
+                                name="save_user_profile",
+                                arguments=(
+                                    '{"interests":"Distributed systems, AI products",'
+                                    '"future_goals":"Build useful study tools and become an ML engineer"}'
+                                ),
+                            ),
+                        )
+                    ]
+                ),
+                _tool_response(
+                    content="Thanks, I saved your interests and future goals to your profile."
+                ),
+            ]
+        ),
+    )
+
+    profile_response = client.post(
+        "/chat/messages",
+        json={
+            "content": (
+                "I'm interested in distributed systems and AI products. In the future I want "
+                "to build useful study tools and become an ML engineer."
+            )
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert profile_response.status_code == 200
+    assert "save user profile: saved interests='Distributed systems, AI products'" in profile_response.json()["assistant_message"]["content"]
+
+    async def _load_state() -> tuple[User | None, list[Notification]]:
+        async with client.factory() as session:  # type: ignore[attr-defined]
+            user = await session.get(User, user_id)
+            rows = await session.execute(
+                select(Notification)
+                .where(Notification.user_id == user_id)
+                .order_by(Notification.id.asc())
+            )
+            return user, list(rows.scalars().all())
+
+    user, notifications = asyncio.run(_load_state())
+    assert user is not None
+    assert user.interests == "Distributed systems, AI products"
+    assert user.future_goals == "Build useful study tools and become an ML engineer"
+    assert notifications[-1].status == "complete"
+
+
 def test_post_chat_message_recovers_from_invalid_schedule_tool_call(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

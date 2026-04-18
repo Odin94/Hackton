@@ -81,6 +81,8 @@ async def _make_user(session: AsyncSession, **kw) -> User:
         username=kw.get("username", f"user_{_user_counter}"),
         name=kw.get("name"),
         email=kw.get("email"),
+        interests=kw.get("interests"),
+        future_goals=kw.get("future_goals"),
     )
     session.add(user)
     await session.flush()
@@ -106,6 +108,8 @@ async def test_create_user(session: AsyncSession):
         name="Bob",
         email="bob@example.com",
         phone_number="+49123456789",
+        interests="Machine learning, systems",
+        future_goals="Become a strong AI engineer",
     )
     session.add(user)
     await session.commit()
@@ -115,6 +119,8 @@ async def test_create_user(session: AsyncSession):
     assert fetched.username == "bob"
     assert fetched.email == "bob@example.com"
     assert fetched.phone_number == "+49123456789"
+    assert fetched.interests == "Machine learning, systems"
+    assert fetched.future_goals == "Become a strong AI engineer"
     assert fetched.created_at is not None
     assert fetched.updated_at is not None
 
@@ -294,7 +300,13 @@ async def test_build_scheduler_sqlite_context_includes_user_state(engine):
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async with factory() as session:
-        user = await _make_user(session, username="planner", name="Planner")
+        user = await _make_user(
+            session,
+            username="planner",
+            name="Planner",
+            interests="ML, study routines",
+            future_goals="Build strong research habits",
+        )
         course = Course(user_id=user.id, name="Algorithms")
         session.add(course)
         await session.flush()
@@ -344,6 +356,8 @@ async def test_build_scheduler_sqlite_context_includes_user_state(engine):
     assert "course_id=" in context
     assert "Review your notes before Algorithms." in context
     assert "quiz_id=" in context
+    assert "ML, study routines" in context
+    assert "Build strong research habits" in context
 
 
 def test_build_llm_user_prompt_includes_diary_and_sqlite_context():

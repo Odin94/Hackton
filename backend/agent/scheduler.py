@@ -173,7 +173,10 @@ async def _build_scheduler_sqlite_context(user_id: int) -> str:
         )
 
     lines = [
-        f"User: username={user.username!r}, name={user.name!r}, email={user.email!r}",
+        (
+            f"User: username={user.username!r}, name={user.name!r}, email={user.email!r}, "
+            f"interests={user.interests!r}, future_goals={user.future_goals!r}"
+        ),
         "Courses:",
     ]
     if courses:

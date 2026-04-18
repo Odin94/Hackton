@@ -35,6 +35,7 @@ _PROMPT_HISTORY_MESSAGES = 12
 _COURSE_NOTIFICATION_MARKER = "What courses do you have?"
 _SCHEDULE_NOTIFICATION_MARKER = "Please share the schedule for all of your courses"
 _DEADLINE_NOTIFICATION_MARKER = "Please share any deadlines or exam dates"
+_PROFILE_NOTIFICATION_MARKER = "What are your interests, and what are your goals for the future?"
 _VALID_EVENT_TYPES = ("lecture", "tutorium", "study session")
 _DEMO_STATUS_AWAITING_SLIDES = "awaiting_slides_progress"
 _DEMO_STATUS_AWAITING_QUIZ = "awaiting_quiz_answers"
@@ -166,6 +167,24 @@ _CHAT_TOOLS: list[dict[str, Any]] = [
                     }
                 },
                 "required": ["deadlines"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_user_profile",
+            "description": (
+                "Save the user's broader interests and future goals when they clearly share "
+                "both during onboarding or a later profile update."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "interests": {"type": "string"},
+                    "future_goals": {"type": "string"},
+                },
+                "required": ["interests", "future_goals"],
             },
         },
     },
@@ -454,6 +473,7 @@ async def activate_demo_conversation(
                     Notification.content.contains(_COURSE_NOTIFICATION_MARKER)
                     | Notification.content.contains(_SCHEDULE_NOTIFICATION_MARKER)
                     | Notification.content.contains(_DEADLINE_NOTIFICATION_MARKER)
+                    | Notification.content.contains(_PROFILE_NOTIFICATION_MARKER)
                     | Notification.content.contains("Hey you finished your ")
                 ),
             )
@@ -769,6 +789,7 @@ async def _generate_chat_response(
         "- add_courses: save courses the user is taking.\n"
         "- add_schedule_events: save course-linked schedule events.\n"
         "- add_deadlines: save course-linked deadlines or exam dates.\n\n"
+        "- save_user_profile: save the user's interests and future goals.\n\n"
         "Onboarding order matters:\n"
         "1. If the user has no saved courses yet, ask 'What courses do you have?' and use "
         "add_courses when they clearly name them. Confirm the courses you added by name.\n"
@@ -778,7 +799,10 @@ async def _generate_chat_response(
         "save those and ask one more time for the missing course names.\n"
         "3. After every course has at least one schedule event, ask for deadlines or exam dates and "
         "use add_deadlines only when each item has a saved course_id plus a specific ISO-8601 datetime. "
-        "If some courses are still missing deadlines, ask specifically for those.\n\n"
+        "If some courses are still missing deadlines, ask specifically for those.\n"
+        "4. After deadlines are covered, ask for the user's interests and what their goals for the "
+        "future are. Use save_user_profile only when both are clear. If they answer only one part, "
+        "ask a short follow-up for the missing part.\n\n"
         "Do not invent courses, course_ids, datetimes, or deadlines. If required details are "
         "ambiguous or missing, ask a short clarifying question instead."
     )
@@ -1065,6 +1089,37 @@ async def _dispatch_tool_call(
             return (
                 "Failed to add deadlines because the provided deadline details were invalid: "
                 f"{e}. Ask the user for explicit course names and exact dates or times."
+            ), ToolEvent(tool_name=tool_name, status="error", detail=detail)
+
+    if tool_name == "save_user_profile":
+        try:
+            user = await _save_user_profile(
+                session,
+                user_id,
+                interests=str(args["interests"]),
+                future_goals=str(args["future_goals"]),
+            )
+            detail = (
+                f"saved interests={user.interests!r}; "
+                f"saved future goals={user.future_goals!r}"
+            )
+            return "Saved the user's interests and future goals.", ToolEvent(
+                tool_name=tool_name,
+                status="success",
+                detail=detail,
+            )
+        except ValueError as e:
+            log.warning(
+                "chat._dispatch_tool_call validation_error user_id=%d tool=%s error=%s args=%r",
+                user_id,
+                tool_name,
+                e,
+                args,
+            )
+            detail = str(e)
+            return (
+                "Failed to save the user's interests and future goals because the provided "
+                f"profile details were invalid: {e}. Ask the user for both clearly."
             ), ToolEvent(tool_name=tool_name, status="error", detail=detail)
 
     if tool_name == "generate_demo_quiz":
@@ -1464,6 +1519,15 @@ async def _add_deadlines(
         await _complete_onboarding_notifications(
             session, user_id=user_id, marker=_DEADLINE_NOTIFICATION_MARKER
         )
+        await _upsert_followup_notification(
+            session,
+            user_id=user_id,
+            marker=_PROFILE_NOTIFICATION_MARKER,
+            content=(
+                "Last onboarding question: what are your interests, and what are your goals "
+                "for the future? I'll save that to your profile."
+            ),
+        )
     log.info(
         "chat._add_deadlines committed user_id=%d added_count=%d deadline_names=%s",
         user_id,
@@ -1471,6 +1535,39 @@ async def _add_deadlines(
         [deadline.name for deadline in stored],
     )
     return stored, missing_courses
+
+
+async def _save_user_profile(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    interests: str,
+    future_goals: str,
+) -> User:
+    user = await session.get(User, user_id)
+    if user is None:
+        raise ValueError(f"unknown user_id: {user_id}")
+
+    cleaned_interests = interests.strip()
+    cleaned_future_goals = future_goals.strip()
+    if not cleaned_interests:
+        raise ValueError("interests cannot be empty")
+    if not cleaned_future_goals:
+        raise ValueError("future goals cannot be empty")
+
+    user.interests = cleaned_interests
+    user.future_goals = cleaned_future_goals
+    await _complete_onboarding_notifications(
+        session, user_id=user_id, marker=_PROFILE_NOTIFICATION_MARKER
+    )
+    await session.flush()
+    log.info(
+        "chat._save_user_profile committed user_id=%d interests_len=%d future_goals_len=%d",
+        user_id,
+        len(cleaned_interests),
+        len(cleaned_future_goals),
+    )
+    return user
 
 
 def _parse_iso_datetime(value: str) -> datetime:
@@ -1569,7 +1666,10 @@ async def _build_sqlite_context(session: AsyncSession, user_id: int) -> str:
     )
 
     lines = [
-        f"User: username={user.username!r}, name={user.name!r}, email={user.email!r}",
+        (
+            f"User: username={user.username!r}, name={user.name!r}, email={user.email!r}, "
+            f"interests={user.interests!r}, future_goals={user.future_goals!r}"
+        ),
         "Courses:",
     ]
     if courses:
