@@ -9,6 +9,13 @@ Conventions:
 
 ---
 
+## Iteration 6 — seed resilience + backend README (87 tests)
+
+- **`cmd_ingest` continues past per-file errors.** Previously a single failing `cognee.add` aborted the whole run; now failures are logged, collected, and summarized; the manifest is still saved and the process exits non-zero if anything failed. Successful files still get recorded, so re-runs resume where they left off.
+- **Consistent logging.** Remaining `print()` calls in `seed.py` swapped to `log.info` / `log.warning` / `log.error`. Matches `cognee_service`'s log style.
+- **Added `backend/README.md`** (was empty). Covers setup, run, seed CLI, route table with bounds + error mapping, env vars, test commands, troubleshooting cheat-sheet. Demo-presentation win and a landing page for Odin/Amin.
+- **Tests:** +4 integration-style `cmd_ingest` tests using `tmp_path` — happy path with per-file mock assertions, SHA256 skip-on-rerun, continue-past-single-file-error with manifest verification, missing-subdir tolerance. Full suite 87 tests, 0.37s.
+
 ## Iteration 5 — response models, LLM timeout, duration logging (83 tests)
 
 - **Response models:** every route declares `response_model=...` (`StatusResp`, `AnswerResp`, `QuizResp`, `IndexStatusResp`). FastAPI's `/docs` now shows the typed envelope; no free-form `dict` anywhere. Wire shape unchanged — fully backward-compatible with the frontend.
