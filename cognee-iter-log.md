@@ -9,6 +9,14 @@ Conventions:
 
 ---
 
+## Iteration 10 — ruff lint gate (88 tests, 0 lint issues)
+
+- Added `ruff>=0.6` to dev deps and a minimal `[tool.ruff]` config in `pyproject.toml`: line length 100, target py312, rules `E F I UP B SIM`, ignores `E501`/`B008`/`SIM117` as situational false-positives.
+- Ran `uv run ruff check --fix` to auto-apply 21 safe fixes across 6 files: import sort (I001), `datetime.timezone.utc` → `datetime.UTC` (UP017), `typing.AsyncIterator` → `collections.abc` (UP035), bare `asyncio.TimeoutError` → builtin `TimeoutError` alias (UP041).
+- Manually fixed one B007 (unused loop var) by replacing an `(field, kwargs)` tuple iteration with a bare list-of-kwargs, which was clearer anyway.
+- `uv run ruff check` now returns clean; tests still 88 green.
+- Gives Odin/Amin a working lint target without imposing formatter churn.
+
 ## Iteration 9 — OpenAPI polish (88 tests)
 
 - Every route has a `summary=`, a short docstring (surfaces as route description in `/docs`), and a `tags=` grouping (`ingest` / `index` / `query` / `health`). `/docs` page now has clean collapsible sections instead of a flat list.
