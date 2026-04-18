@@ -19,6 +19,21 @@ Conventions:
 
 ---
 
+## Iteration 12 — critical bug fixes from audit (91 tests)
+
+Two confirmed-broken issues, fixed:
+
+- **#1 source_ref was gibberish.** Traced: `cognee.add(data=string, dataset_name=…)` routes through `save_data_to_file` which generates `text_<md5>.txt` as the Document name when no filename is provided (`ingestion/save_data_to_file.py:19-22`). So every `QuizItem.source_ref` was that md5 string — spec §10 item 4 was nominally passing but producing useless output. Fix: `add_material` writes the body to a per-call tempdir under a sanitized `material.source` filename, then passes the absolute path to `cognee.add`. Cognee's `save_data_item_to_storage` detects abs-path strings → returns `file://` URI → loader extracts the real filename → `data_point.name` is preserved end-to-end (`ingest_data.py:153`). Tempdir is isolated per-call (no collision on concurrent same-`source` ingests) and cleaned up in `finally`. New `_safe_filename` helper sanitizes path-traversal attempts (`../../etc/passwd` → `etc_passwd`).
+- **#3 dataset isolation was fictional.** Traced: `ENABLE_BACKEND_ACCESS_CONTROL=false` (our prior default) routed cognee's `search_in_datasets_context` through the `else` branch that calls `get_retriever_output(dataset=None, …)` (`modules/search/methods/search.py:304-327`) — a single unfiltered query across the whole graph. The `datasets=["diary"]` arg was ignored. Fix: flip the flag to `true` in `.env` / `.env.example`. Verified our LanceDB+Kuzu setup is in cognee's multi-user-supported lists (`context_global_variables.py:94-95`) and that `add`/`cognify` honor the flag via the pipeline's `set_database_global_context_variables` call. Enables per-dataset DB files — real storage isolation. **Needs live-run confirmation.**
+- **Tests:** +3 for `add_material` (file-path ingest, path-traversal sanitization, tempdir-cleanup-on-failure). Updated existing "header line" test that asserted against raw-body `data`. Full suite 91 passing, 0 lint.
+
+Logged as deltas 10 and 11.
+
+**Still unverified — needs live run:**
+- #4 LiteLLM `response_format` stripping on OpenRouter (our `extra_body` hack may or may not survive).
+- #6 cognee's entity extractor parsing the `Topics: …` trailing sentence as intended.
+- #3 fix itself — does the flag actually isolate in single-user mode end-to-end.
+
 ## Iteration 11 — typed error hierarchy + quiz simplification (89 tests)
 
 **Motivation:** "reliable and simple" — live acceptance blocked on materials, so focus on things that improve both without needing real data.

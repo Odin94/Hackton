@@ -24,7 +24,20 @@ Format per entry:
 - **Why:** Trivial liveness endpoint — useful for frontend boot checks and for detecting config misconfiguration (since `config.py` raises at import, a responding `/health` proves env is wired).
 - **Status:** proposed — implemented on `cognee/iter`. Spec table not yet amended.
 
-## Delta 9 — Typed error hierarchy
+## Delta 10 — `add_material` ingests as a file path (source_ref preservation)
+
+- **Section:** §3 service / §10 acceptance item 4.
+- **Change:** `add_material` now writes the material body to a tempdir under `material.source` as the filename, then hands cognee the file path. Was passing a raw string, which caused cognee's `save_data_to_file` to generate `text_<md5>.txt` as the Document name — making every `QuizItem.source_ref` meaningless gibberish.
+- **Why:** Spec §10 item 4 requires `source_ref` to be populated with a filename from seeded materials. Verified: with raw-string ingest, the name is an md5 hash; with file-path ingest, `Document.name` is the actual filename (`cognee/tasks/ingestion/ingest_data.py:153`).
+- **Status:** implemented on `cognee/iter`. `material.source` is sanitized to a filesystem-safe name before being used as the filename. Tempdir is isolated per-call (so concurrent ingests of the same `source` can't collide) and removed after `cognee.add` returns (including on failure).
+
+## Delta 11 — Enable `ENABLE_BACKEND_ACCESS_CONTROL` for real dataset isolation
+
+- **Section:** §1 datasets / §6 config.
+- **Change:** `.env` and `.env.example` flip `ENABLE_BACKEND_ACCESS_CONTROL=false` → `true`. Spec §1 says "kept disjoint"; with the flag off, cognee's `search()` runs a single unfiltered query with `dataset=None` (`modules/search/methods/search.py:304-327`), so `datasets=["diary"]` is ignored and diary queries can pull materials-derived context (and vice versa).
+- **Why:** LanceDB + Kuzu are both in cognee's `VECTOR_DBS_WITH_MULTI_USER_SUPPORT` / `GRAPH_DBS_WITH_MULTI_USER_SUPPORT` lists, so the flag materializes per-dataset database files — real storage-level isolation. The same flag routes `add`/`cognify` to the dataset-specific DB via the pipeline's `set_database_global_context_variables` call, so data-in and data-out stay consistent.
+- **Risk:** not yet verified under a live cognify run. If single-user mode mis-behaves with the flag on, fallback is prompt-engineering isolation (tell the LLM "only consider diary entries" in query prompts).
+- **Status:** flag flipped on `cognee/iter`. Needs live-run confirmation.
 
 - **Section:** §3 service / §4 error mapping.
 - **Change:** `CogneeServiceError` now has concrete subclasses: `NoDataError`, `LLMTimeoutError`, `MalformedLLMResponseError`, `UpstreamRateLimitError`, `UpstreamError`. Each sets a sensible `default_retryable`. `_wrap()` returns the specific subclass when the underlying exception matches a known pattern, otherwise the base class (treated as non-retryable). All subclasses still pass `isinstance(exc, CogneeServiceError)`, so §4 HTTP mapping continues to work without changes.
