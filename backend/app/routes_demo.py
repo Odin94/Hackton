@@ -21,8 +21,10 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from sqlalchemy import func, select
+
 from agent.database import AsyncSessionLocal
-from agent.models import Quiz, QuizResult
+from agent.models import Course, Deadline, Quiz, QuizResult, ScheduleEvent
 from app.auth import get_user_id
 from app.chat_service import append_chat_message, serialize_chat_message
 from app.connection_manager import manager
@@ -186,3 +188,122 @@ async def post_quiz_results(
         req.false_answers,
     )
     return QuizResultResp(quiz_id=quiz_id, quiz_result_id=result_id)
+
+
+class OverviewCourse(BaseModel):
+    id: int
+    name: str
+
+
+class OverviewEvent(BaseModel):
+    id: int
+    course_name: str
+    type: str
+    name: str
+    start_datetime: str
+    end_datetime: str
+
+
+class OverviewDeadline(BaseModel):
+    id: int
+    course_name: str
+    name: str
+    datetime: str
+
+
+class OverviewQuizStat(BaseModel):
+    total_taken: int
+    average_percent: int
+
+
+class OverviewResp(BaseModel):
+    now: str
+    courses: list[OverviewCourse]
+    upcoming_events: list[OverviewEvent]
+    upcoming_deadlines: list[OverviewDeadline]
+    quiz: OverviewQuizStat
+
+
+@router.get(
+    "/demo/overview",
+    response_model=OverviewResp,
+    summary="Sidebar snapshot: courses, upcoming events, deadlines, quiz stats",
+)
+async def get_demo_overview(
+    authorization: str | None = Header(default=None),
+) -> OverviewResp:
+    user_id = _require_user_id(authorization)
+    now = datetime.now(UTC)
+    async with AsyncSessionLocal() as session:
+        course_rows = (
+            await session.execute(
+                select(Course).where(Course.user_id == user_id).order_by(Course.id)
+            )
+        ).scalars().all()
+        course_by_id = {c.id: c for c in course_rows}
+
+        event_rows = (
+            await session.execute(
+                select(ScheduleEvent)
+                .where(
+                    ScheduleEvent.user_id == user_id,
+                    ScheduleEvent.end_datetime >= now,
+                )
+                .order_by(ScheduleEvent.start_datetime)
+                .limit(6)
+            )
+        ).scalars().all()
+
+        deadline_rows = (
+            await session.execute(
+                select(Deadline)
+                .where(
+                    Deadline.user_id == user_id,
+                    Deadline.datetime >= now,
+                )
+                .order_by(Deadline.datetime)
+                .limit(6)
+            )
+        ).scalars().all()
+
+        totals = (
+            await session.execute(
+                select(
+                    func.count(QuizResult.id),
+                    func.coalesce(func.sum(QuizResult.correct_answers), 0),
+                    func.coalesce(func.sum(QuizResult.false_answers), 0),
+                ).where(QuizResult.user_id == user_id)
+            )
+        ).one()
+
+    taken = int(totals[0] or 0)
+    correct = int(totals[1] or 0)
+    wrong = int(totals[2] or 0)
+    attempted = correct + wrong
+    pct = round(100 * correct / attempted) if attempted else 0
+
+    return OverviewResp(
+        now=now.isoformat(),
+        courses=[OverviewCourse(id=c.id, name=c.name) for c in course_rows],
+        upcoming_events=[
+            OverviewEvent(
+                id=e.id,
+                course_name=course_by_id[e.course_id].name if e.course_id in course_by_id else "",
+                type=e.type,
+                name=e.name,
+                start_datetime=e.start_datetime.isoformat(),
+                end_datetime=e.end_datetime.isoformat(),
+            )
+            for e in event_rows
+        ],
+        upcoming_deadlines=[
+            OverviewDeadline(
+                id=d.id,
+                course_name=course_by_id[d.course_id].name if d.course_id in course_by_id else "",
+                name=d.name,
+                datetime=d.datetime.isoformat(),
+            )
+            for d in deadline_rows
+        ],
+        quiz=OverviewQuizStat(total_taken=taken, average_percent=pct),
+    )

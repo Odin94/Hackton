@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import './App.css'
 import {
   DEMO_USERNAME,
@@ -39,6 +39,30 @@ type ChatSocketPayload = {
   echo?: string
 }
 
+type OverviewCourse = { id: number; name: string }
+type OverviewEvent = {
+  id: number
+  course_name: string
+  type: string
+  name: string
+  start_datetime: string
+  end_datetime: string
+}
+type OverviewDeadline = {
+  id: number
+  course_name: string
+  name: string
+  datetime: string
+}
+type OverviewQuizStat = { total_taken: number; average_percent: number }
+type OverviewResp = {
+  now: string
+  courses: OverviewCourse[]
+  upcoming_events: OverviewEvent[]
+  upcoming_deadlines: OverviewDeadline[]
+  quiz: OverviewQuizStat
+}
+
 const TOKEN_KEY = 'tumtum-demo-token'
 
 const SCENE_B_USER_LINE =
@@ -69,6 +93,7 @@ function App() {
   const [quizAutoPlay, setQuizAutoPlay] = useState(false)
   const [isSending, setIsSending] = useState(false)
   const [isAutoRunning, setIsAutoRunning] = useState(false)
+  const [overview, setOverview] = useState<OverviewResp | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
   const quizDoneResolverRef = useRef<(() => void) | null>(null)
 
@@ -101,6 +126,33 @@ function App() {
     }
     setStatus(`Ready as ${DEMO_USERNAME} — press Play to run the demo.`)
   }, [token])
+
+  useEffect(() => {
+    if (!token) {
+      return
+    }
+    let cancelled = false
+    async function loadOverview() {
+      try {
+        const response = await fetch('/demo/overview', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (!response.ok) {
+          throw new Error(`overview ${response.status}`)
+        }
+        const body = (await response.json()) as OverviewResp
+        if (!cancelled) {
+          setOverview(body)
+        }
+      } catch {
+        // Sidebar is best-effort; silent fail keeps demo flow clean.
+      }
+    }
+    void loadOverview()
+    return () => {
+      cancelled = true
+    }
+  }, [token, messages.length])
 
   useEffect(() => {
     const list = listRef.current
@@ -160,9 +212,22 @@ function App() {
   }
 
   async function sendScriptedTurn(userContent: string, systemContent: string) {
-    await postJSON('/demo/scripted-turn', {
+    const response = await postJSON('/demo/scripted-turn', {
       user_content: userContent,
       system_content: systemContent,
+    })
+    const body = (await response.json()) as {
+      user_message: ChatMessage
+      assistant_message: ChatMessage
+    }
+    setMessages((current) => {
+      const next = [...current]
+      for (const message of [body.user_message, body.assistant_message]) {
+        if (!next.some((m) => m.id === message.id)) {
+          next.push(message)
+        }
+      }
+      return next
     })
   }
 
@@ -322,76 +387,79 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
-      <header className="demo-header">
-        <div>
-          <p className="eyebrow">TumTum · Study Coach</p>
-          <h1>Chat with Odin</h1>
-        </div>
-        <div className="status-pill" aria-live="polite">
-          <button
-            type="button"
-            className="play-button"
-            onClick={() => void runFullDemo()}
-            disabled={!token || isAutoRunning}
-          >
-            {isAutoRunning ? '▸ Running demo...' : '▶ Play demo'}
-          </button>
-          <span className="status-text">{status}</span>
-        </div>
-      </header>
-
-      <section className="chat-panel">
-        <div className="message-list" ref={listRef}>
-          {messages.length === 0 ? (
-            <div className="empty-state">
-              <p>No messages yet — press Play demo to start.</p>
-            </div>
-          ) : (
-            messages.map((message) => (
-              <article
-                key={message.id}
-                className={`message-bubble message-${message.author}`}
-              >
-                <div className="message-meta">
-                  <span>{message.author === 'user' ? DEMO_USERNAME : 'tumtum'}</span>
-                  <span className="message-time">
-                    {formatTime(message.timestamp)}
-                    {message.processing_ms != null ? ` · ${message.processing_ms} ms` : ''}
-                  </span>
-                </div>
-                <p>{message.content}</p>
-              </article>
-            ))
-          )}
-        </div>
-
-        <form className="composer" onSubmit={handleSend}>
-          <textarea
-            id="message"
-            name="message"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault()
-                void handleSend(event as unknown as FormEvent<HTMLFormElement>)
-              }
-            }}
-            placeholder="Write a message..."
-            rows={3}
-            disabled={!token || isSending || isAutoRunning}
-          />
-          <div className="composer-actions">
-            <p className="helper-text">
-              Press ▶ Play demo for the full scripted 7-scene run.
-            </p>
-            <button type="submit" disabled={!token || isSending || isAutoRunning || !draft.trim()}>
-              {isSending ? 'Sending...' : 'Send'}
-            </button>
+    <div className="app-shell">
+      <Sidebar overview={overview} />
+      <main className="app-main">
+        <header className="demo-header">
+          <div>
+            <p className="eyebrow">TumTum · Study Coach</p>
+            <h1>Chat with Odin</h1>
           </div>
-        </form>
-      </section>
+          <div className="status-pill" aria-live="polite">
+            <button
+              type="button"
+              className="play-button"
+              onClick={() => void runFullDemo()}
+              disabled={!token || isAutoRunning}
+            >
+              {isAutoRunning ? '▸ Running demo...' : '▶ Play demo'}
+            </button>
+            <span className="status-text">{status}</span>
+          </div>
+        </header>
+
+        <section className="chat-panel">
+          <div className="message-list" ref={listRef}>
+            {messages.length === 0 ? (
+              <div className="empty-state">
+                <p>No messages yet — press Play demo to start.</p>
+              </div>
+            ) : (
+              messages.map((message) => (
+                <article
+                  key={message.id}
+                  className={`message-bubble message-${message.author}`}
+                >
+                  <div className="message-meta">
+                    <span>{message.author === 'user' ? DEMO_USERNAME : 'tumtum'}</span>
+                    <span className="message-time">
+                      {formatTime(message.timestamp)}
+                      {message.processing_ms != null ? ` · ${message.processing_ms} ms` : ''}
+                    </span>
+                  </div>
+                  <p>{message.content}</p>
+                </article>
+              ))
+            )}
+          </div>
+
+          <form className="composer" onSubmit={handleSend}>
+            <textarea
+              id="message"
+              name="message"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault()
+                  void handleSend(event as unknown as FormEvent<HTMLFormElement>)
+                }
+              }}
+              placeholder="Write a message..."
+              rows={3}
+              disabled={!token || isSending || isAutoRunning}
+            />
+            <div className="composer-actions">
+              <p className="helper-text">
+                Press ▶ Play demo for the full scripted 7-scene run.
+              </p>
+              <button type="submit" disabled={!token || isSending || isAutoRunning || !draft.trim()}>
+                {isSending ? 'Sending...' : 'Send'}
+              </button>
+            </div>
+          </form>
+        </section>
+      </main>
 
       {quizOpen ? (
         <QuizOverlay
@@ -405,7 +473,109 @@ function App() {
           onComplete={handleQuizComplete}
         />
       ) : null}
-    </main>
+    </div>
+  )
+}
+
+function Sidebar({ overview }: { overview: OverviewResp | null }) {
+  return (
+    <aside className="sidebar">
+      <div className="sidebar-brand">
+        <span className="sidebar-brand-mark">TT</span>
+        <div>
+          <p className="eyebrow">TumTum</p>
+          <p className="sidebar-brand-sub">Study coach</p>
+        </div>
+      </div>
+
+      <SidebarSection title="Courses">
+        {overview && overview.courses.length > 0 ? (
+          <ul className="sidebar-list">
+            {overview.courses.map((course) => (
+              <li key={course.id} className="sidebar-item">
+                <span className="sidebar-dot" aria-hidden />
+                <span>{course.name}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="sidebar-empty">No courses on file.</p>
+        )}
+      </SidebarSection>
+
+      <SidebarSection title="Upcoming events">
+        {overview && overview.upcoming_events.length > 0 ? (
+          <ul className="sidebar-list">
+            {overview.upcoming_events.map((event) => (
+              <li key={event.id} className="sidebar-item sidebar-item-stack">
+                <div className="sidebar-item-row">
+                  <span className="sidebar-item-title">{event.name}</span>
+                  <span className="sidebar-item-tag">{event.type}</span>
+                </div>
+                <div className="sidebar-item-meta">
+                  <span className="sidebar-item-course">{event.course_name}</span>
+                  <span className="sidebar-item-time">{formatDayTime(event.start_datetime)}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="sidebar-empty">Nothing scheduled.</p>
+        )}
+      </SidebarSection>
+
+      <SidebarSection title="Deadlines">
+        {overview && overview.upcoming_deadlines.length > 0 ? (
+          <ul className="sidebar-list">
+            {overview.upcoming_deadlines.map((deadline) => (
+              <li key={deadline.id} className="sidebar-item sidebar-item-stack">
+                <div className="sidebar-item-row">
+                  <span className="sidebar-item-title">{deadline.name}</span>
+                </div>
+                <div className="sidebar-item-meta">
+                  <span className="sidebar-item-course">{deadline.course_name}</span>
+                  <span className="sidebar-item-time">{formatDayTime(deadline.datetime)}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="sidebar-empty">No pending deadlines.</p>
+        )}
+      </SidebarSection>
+
+      <SidebarSection title="Quiz performance">
+        {overview ? (
+          <div className="sidebar-stats">
+            <div className="sidebar-stat">
+              <span className="sidebar-stat-value">{overview.quiz.total_taken}</span>
+              <span className="sidebar-stat-label">quizzes</span>
+            </div>
+            <div className="sidebar-stat">
+              <span className="sidebar-stat-value">{overview.quiz.average_percent}%</span>
+              <span className="sidebar-stat-label">avg score</span>
+            </div>
+          </div>
+        ) : (
+          <p className="sidebar-empty">Loading…</p>
+        )}
+      </SidebarSection>
+    </aside>
+  )
+}
+
+function SidebarSection({
+  title,
+  children,
+}: {
+  title: string
+  children: ReactNode
+}) {
+  return (
+    <section className="sidebar-section">
+      <h2 className="sidebar-section-title">{title}</h2>
+      {children}
+    </section>
   )
 }
 
@@ -548,6 +718,21 @@ function formatTime(iso: string) {
   try {
     const d = new Date(iso)
     return d.toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return iso
+  }
+}
+
+function formatDayTime(iso: string) {
+  try {
+    const d = new Date(iso)
+    return d.toLocaleString(undefined, {
+      weekday: 'short',
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
