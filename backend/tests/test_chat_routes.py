@@ -530,12 +530,26 @@ def test_demo_flow_scores_quiz_and_recommends_library(
         QuizItem(
             question="What does self-attention compute?",
             answer="It computes context-aware token representations.",
+            options=[
+                "It computes context-aware token representations.",
+                "It stores positional embeddings.",
+                "It normalizes batch statistics.",
+                "It applies dropout.",
+            ],
+            correct_index=0,
             topic="transformers",
             source_ref="Machine Learning",
         ),
         QuizItem(
             question="Why do transformers use positional information?",
             answer="Because attention alone does not encode token order.",
+            options=[
+                "Because attention alone does not encode token order.",
+                "To reduce parameter count.",
+                "To enable dropout.",
+                "To simplify backprop.",
+            ],
+            correct_index=0,
             topic="transformers",
             source_ref="Machine Learning",
         ),
@@ -667,6 +681,13 @@ def test_demo_flow_low_energy_branch_recommends_rest(
         QuizItem(
             question="What is backpropagation used for?",
             answer="It computes gradients for learning.",
+            options=[
+                "It computes gradients for learning.",
+                "It samples mini-batches.",
+                "It initializes weights.",
+                "It shuffles the dataset.",
+            ],
+            correct_index=0,
             topic="backprop",
             source_ref="Machine Learning",
         )

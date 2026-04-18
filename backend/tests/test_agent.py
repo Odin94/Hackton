@@ -385,8 +385,20 @@ async def test_build_scheduler_cognee_context_uses_combined_seeded_data():
 @pytest.fixture
 def fake_quiz_items() -> list[QuizItem]:
     return [
-        QuizItem(question="What is backprop?", answer="Gradient descent.", topic="ML"),
-        QuizItem(question="Define overfitting.", answer="High variance.", topic="ML"),
+        QuizItem(
+            question="What is backprop?",
+            answer="Gradient descent.",
+            options=["Gradient descent.", "Random search.", "Gradient ascent.", "Newton's method."],
+            correct_index=0,
+            topic="ML",
+        ),
+        QuizItem(
+            question="Define overfitting.",
+            answer="High variance.",
+            options=["High variance.", "High bias.", "Underfitting.", "Regularization."],
+            correct_index=0,
+            topic="ML",
+        ),
     ]
 
 

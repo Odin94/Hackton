@@ -383,8 +383,15 @@ _QUIZ_SCHEMA = {
                 "properties": {
                     "question": {"type": "string"},
                     "answer": {"type": "string"},
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 4,
+                        "maxItems": 4,
+                    },
+                    "correct_index": {"type": "integer", "minimum": 0, "maximum": 3},
                 },
-                "required": ["question", "answer"],
+                "required": ["question", "answer", "options", "correct_index"],
             },
         },
     },
@@ -428,7 +435,7 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
         log.debug("generate_quiz: context_len=%d source_ref=%r topic=%r", len(context_text), source_ref, topic)
 
         system_prompt = (
-            "You generate study quiz items strictly grounded in lecture materials.\n"
+            "You generate multiple-choice study quiz items strictly grounded in lecture materials.\n"
             "Rules:\n"
             "1. Use ONLY context that reads like lecture content, textbook prose, "
             "or slide text. If the context contains personal journal entries or "
@@ -437,9 +444,15 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
             "alone — no outside knowledge.\n"
             "3. Mix question types: definitional, mechanism, application, comparison.\n"
             "4. Avoid trivial restatement ('What does the context say about X?'). Test understanding.\n"
-            "5. Answers must be 1–2 sentences, factual, self-contained.\n"
-            f"6. Return exactly {n} items.\n"
-            'Output JSON: {"items":[{"question":str,"answer":str}, ...]}.'
+            "5. Each item has exactly 4 options. Exactly one is correct. The three distractors "
+            "must be plausible, subject-matter-relevant, and drawn from realistic misconceptions "
+            "about the topic — not random, silly, or obviously wrong.\n"
+            "6. `answer` is a concise 1–2 sentence explanation of the correct option "
+            "(what makes it right, and optionally why the distractors are wrong).\n"
+            "7. `correct_index` is the 0-based index into `options` of the correct option.\n"
+            f"8. Return exactly {n} items.\n"
+            'Output JSON: {"items":[{"question":str,"answer":str,'
+            '"options":[str,str,str,str],"correct_index":int}, ...]}.'
         )
         user_prompt = f"Topic: {topic}\n\nContext:\n{context_text}"
 
@@ -463,6 +476,8 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
             QuizItem(
                 question=str(item["question"]),
                 answer=str(item["answer"]),
+                options=[str(o) for o in item["options"]],
+                correct_index=int(item["correct_index"]),
                 topic=topic,
                 source_ref=source_ref,
             )
@@ -534,7 +549,14 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
         ) from e
 
     if not isinstance(items, list) or not all(
-        isinstance(i, dict) and "question" in i and "answer" in i for i in items
+        isinstance(i, dict)
+        and "question" in i
+        and "answer" in i
+        and isinstance(i.get("options"), list)
+        and len(i["options"]) == 4
+        and isinstance(i.get("correct_index"), int)
+        and 0 <= i["correct_index"] <= 3
+        for i in items
     ):
         log.warning("quiz items malformed: %r", str(items)[:200])
         raise MalformedLLMResponseError("quiz generation returned malformed items")

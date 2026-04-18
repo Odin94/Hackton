@@ -18,5 +18,7 @@ class Material(BaseModel):
 class QuizItem(BaseModel):
     question: str
     answer: str
+    options: list[str] = Field(min_length=4, max_length=4)
+    correct_index: int = Field(ge=0, le=3)
     topic: str
     source_ref: str | None = None

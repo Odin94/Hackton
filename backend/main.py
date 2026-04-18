@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from app import config  # noqa: F401 — normalizes env before cognee loads
+from app.config import settings
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,9 +10,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routes_cognee import router as cognee_router
 from app.routes_auth import router as auth_router
 from app.routes_chat import router as chat_router
+from app.routes_demo import router as demo_router
 from app.routes_ws import router as ws_router
 from agent.db import init_db
 from agent.scheduler import start_scheduler
+from app.demo_time import install_demo_clock
+
+# Apply demo-clock monkey-patch AFTER all app modules have imported datetime.
+# Every `from datetime import datetime` inside those modules becomes a module-
+# level attribute we can patch; lambda/default_factory closures late-bind via
+# module globals, so values generated later (SQLAlchemy column defaults,
+# Pydantic default_factory) see the frozen time.
+install_demo_clock(settings.current_date_override)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -41,6 +51,10 @@ _log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     await _init_cognee_db()
     await init_db()
+    if settings.disable_scheduler:
+        log.info("Scheduler disabled via DISABLE_SCHEDULER — demo mode")
+        yield
+        return
     llm_task, dispatch_task = start_scheduler()
     yield
     llm_task.cancel()
@@ -57,4 +71,5 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(ws_router)
 app.include_router(chat_router)
+app.include_router(demo_router)
 app.include_router(cognee_router)
