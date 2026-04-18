@@ -574,7 +574,7 @@ const MOCK_TOPIC_FOCUS: {
   { topic: 'Powerset construction', course: 'DS', mastery: 62, trend: 'up' },
   { topic: 'ε-closures', course: 'DS', mastery: 78, trend: 'up' },
   { topic: 'Rekursion (H5)', course: 'EInf', mastery: 44, trend: 'flat' },
-  { topic: 'Cache hierarchies', course: 'ERA', mastery: 71, trend: 'down' },
+  { topic: 'Chomsky hierarchy', course: 'DS', mastery: 81, trend: 'up' },
 ]
 
 const MOCK_RECENT_WINS: { when: string; text: string }[] = [
@@ -593,7 +593,6 @@ const MOCK_QUICK_ACTIONS = [
 const MOCK_COURSES: OverviewCourse[] = [
   { id: -1, name: 'Diskrete Strukturen' },
   { id: -2, name: 'Einführung in die Informatik' },
-  { id: -3, name: 'Einführung in die Rechnerarchitektur' },
 ]
 
 const MOCK_EVENTS: OverviewEvent[] = [
@@ -615,14 +614,6 @@ const MOCK_EVENTS: OverviewEvent[] = [
   },
   {
     id: -3,
-    course_name: 'Einführung in die Rechnerarchitektur',
-    type: 'Lecture',
-    name: 'ERA · Cache hierarchies',
-    start_datetime: '2025-11-18T08:00:00Z',
-    end_datetime: '2025-11-18T09:30:00Z',
-  },
-  {
-    id: -4,
     course_name: 'Diskrete Strukturen',
     type: 'Lecture',
     name: 'DS · DFA minimization',
@@ -643,12 +634,6 @@ const MOCK_DEADLINES: OverviewDeadline[] = [
     course_name: 'Einführung in die Informatik',
     name: 'EInf H5 (Rekursion)',
     datetime: '2025-11-20T23:59:00Z',
-  },
-  {
-    id: -3,
-    course_name: 'Einführung in die Rechnerarchitektur',
-    name: 'ERA Quiz 3',
-    datetime: '2025-11-22T12:00:00Z',
   },
 ]
 
