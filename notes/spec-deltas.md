@@ -24,6 +24,18 @@ Format per entry:
 - **Why:** Trivial liveness endpoint — useful for frontend boot checks and for detecting config misconfiguration (since `config.py` raises at import, a responding `/health` proves env is wired).
 - **Status:** proposed — implemented on `cognee/iter`. Spec table not yet amended.
 
+## Delta 14 — Live-run findings + environment hardening
+
+**First live run of the cognee layer exposed several gaps; this delta consolidates the fixes.**
+
+- **`source_ref` now surfaces the course label, not the filename.** Iter-12 assumed cognee's chunk payload would expose `is_part_of → Document.name`. Probed live: cognee v1's `ChunksRetriever` returns `IndexSchema` payloads that don't include `is_part_of` at all. They DO include `belongs_to_set` (from the `node_set=[course]` we pass at `add_material_from_file`). `_extract_source_ref` updated to check `belongs_to_set[0]` first, fall through to `is_part_of` if present. In practice the course label ("Einführung_in_die_Informatik") is more useful for the quiz UI than a filename anyway.
+- **`DatasetNotFoundError` → `NoDataError`.** Querying a dataset that doesn't exist yet (e.g. empty diary) cognee raises `DatasetNotFoundError: No datasets found`. Added to `_NO_DATA_MARKERS` so `_wrap` classifies it as retryable `NoDataError` — callers can handle "cognify hasn't created this dataset yet" uniformly.
+- **`app/__init__.py` now imports `app.config` as a side-effect.** Ruff's import sorter (iter-10) moved `import cognee` above `from app.config import settings` in `cognee_service.py`, silently breaking the env-mutation ordering — cognee's `base_config` cached defaults inside the venv dir. Package-level import is below ruff's reach.
+- **`app/config.py` auto-creates `.cognee_system/{data,system/databases,cache}`** on import. Cognee doesn't auto-mkdir, surfacing as a cryptic SQLite "unable to open database file" on first run. Also: pops `ALL_PROXY` / `all_proxy` env vars (Claude Code's host env sets SOCKS but `socksio` isn't in our deps — httpx falls through to `HTTPS_PROXY` which works).
+- **`main.py` wraps `cognee.run_startup_migrations()` in try/except.** Cognee's `ab7e313804ae_permission_system_rework` migration raises `NoSuchTableError("acls")` on a fresh relational DB (migration reads column metadata before the base tables exist). Cognee's pipeline `setup()` creates the schema lazily on first add/cognify via SQLAlchemy models, so boot-time migration failure is recoverable.
+- **`EMBEDDING_PROVIDER=openai` + `EMBEDDING_MODEL=openai/text-embedding-3-small` required.** Earlier iteration tried `openai_compatible` + endpoint, which routed correctly to the raw OpenAI SDK but cognee's `OpenAICompatibleEmbeddingEngine` is missing the `max_completion_tokens` attribute that its own chunker requires. LiteLLM with the `openai/` prefix works. `.env.example` / README updated.
+- **Status:** all implemented on main. 107 tests passing; smoke test on a 50KB PDF completes ingest + cognify + quiz + isolation check successfully.
+
 ## Delta 13 — Quiz via tool-use instead of `response_format`
 
 - **Section:** §3 quiz call / §9 risk "LiteLLM strips response_format on OpenRouter".

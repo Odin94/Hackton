@@ -19,6 +19,22 @@ Conventions:
 
 ---
 
+## Iteration 16 — live run + environment hardening (107 tests)
+
+**First end-to-end run** against real OpenRouter + OpenAI. A 50KB PDF (`folien-11a.pdf` from the Einführung_in_die_Informatik corpus) ingested + cognified + quizzed successfully. Along the way 9 gaps surfaced; all fixed on main.
+
+- **`source_ref` restored as the course label.** Probed cognee's live chunk payload: `is_part_of` isn't in the default `IndexSchema` payload. But `belongs_to_set` is — it carries the `node_set=[course]` we attach at ingest. `_extract_source_ref` now reads `belongs_to_set[0]` first, falls through to `is_part_of` for engines that do expose it. End-to-end: `QuizItem.source_ref == 'Einführung_in_die_Informatik'` ✓.
+- **Typed error for missing dataset.** Added "no datasets found" / "datasetnotfounderror" to `_NO_DATA_MARKERS`; empty-diary query now surfaces as `NoDataError(retryable=True)` instead of generic CogneeServiceError.
+- **`app/__init__.py` imports `app.config` as a package-level side-effect.** Iter-10's ruff import-sort had reordered `import cognee` above `from app.config import settings` in `cognee_service.py`, causing cognee to cache its `base_config` defaults (pointing into the venv) before our env mutation ran. Package init is below ruff's reach.
+- **`app/config.py` creates cognee's system dirs + pops SOCKS proxy env vars.** `.cognee_system/{data,system/databases,cache}` must exist before cognee's first SQLite open. And Claude Code's `ALL_PROXY=socks5h://…` without `socksio` installed breaks httpx startup — cleared at import time so `HTTPS_PROXY` takes over.
+- **`main.py` try/excepts `cognee.run_startup_migrations()`.** Cognee's alembic migration `ab7e313804ae` raises `NoSuchTableError("acls")` on fresh relational DBs (it reads column metadata before base tables exist). Schema is created lazily by the pipeline's own `setup()` on first add/cognify, so boot failure is recoverable — log and continue.
+- **`.env` / `.env.example` / README embedding config corrected.** `EMBEDDING_PROVIDER=openai` + `EMBEDDING_MODEL=openai/text-embedding-3-small` works via LiteLLM. The `openai_compatible` path is attractive but hit by a cognee bug — `OpenAICompatibleEmbeddingEngine` doesn't expose `max_completion_tokens`, which `get_max_chunk_tokens` requires during cognify.
+- **Tests:** +4 (`_extract_source_ref` from `belongs_to_set`, empty-`belongs_to_set` fallback, end-to-end `source_ref` on `generate_quiz`, `DatasetNotFoundError → NoDataError` in `_wrap`). 107 passing, 0 lint.
+
+**What's still unsolved:**
+- **Large PDFs blocked.** `DS_2023_Script_v1.pdf` (4 MB, Diskrete Strukturen) fails cognify with `sqlite3.OperationalError: too many SQL variables` — cognee's bulk edge-insert exceeds SQLite's placeholder ceiling. Options: postgres (biggest change), smaller chunks (config tweak), pre-split PDFs (offline step). Needs investigation before we can ingest the full 42-PDF corpus.
+- **Quality of quiz on arbitrary topics.** With `folien-11a.pdf` (about Java polymorphism) the quiz topic "boolean logic" produced questions about `instanceof`/subclassing rather than refusing for lack of material. The system prompt says "strictly grounded" but gpt-4o-mini interpreted that loosely. Not a correctness bug — the questions ARE grounded in what the retriever returned — but demo-floor awkward.
+
 ## Iteration 15 — prompt-level dataset isolation (103 tests)
 
 Reversed the AC-on flip from iter 12 in favor of prompt-level isolation. "Reliable and simple" preference — AC-on is cognee's multi-tenant path with unknown edge cases in single-user mode, AC-off is the proven single-user path we've been running on.
