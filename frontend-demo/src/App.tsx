@@ -41,22 +41,36 @@ type ChatSocketPayload = {
 
 const TOKEN_KEY = 'tumtum-demo-token'
 
-type ArmedScript = null | 'scene-c'
+const SCENE_B_USER_LINE =
+  "hmm yeah, the powerset thing got away from me. got time for a reset?"
+const SCENE_G_USER_LINE =
+  "yeah actually feeling way better. i'll hit the library this afternoon."
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+async function typeInto(
+  setDraft: (text: string) => void,
+  text: string,
+  perChar = 35,
+) {
+  setDraft('')
+  for (let i = 0; i < text.length; i += 1) {
+    setDraft(text.slice(0, i + 1))
+    await sleep(perChar)
+  }
+}
 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) ?? '')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [draft, setDraft] = useState('')
   const [status, setStatus] = useState('Booting demo...')
-  const [armedScript, setArmedScript] = useState<ArmedScript>(null)
   const [quizOpen, setQuizOpen] = useState(false)
+  const [quizAutoPlay, setQuizAutoPlay] = useState(false)
   const [isSending, setIsSending] = useState(false)
+  const [isAutoRunning, setIsAutoRunning] = useState(false)
   const listRef = useRef<HTMLDivElement | null>(null)
-  const armedRef = useRef<ArmedScript>(null)
-
-  useEffect(() => {
-    armedRef.current = armedScript
-  }, [armedScript])
+  const quizDoneResolverRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     if (token) {
@@ -85,7 +99,7 @@ function App() {
     if (!token) {
       return
     }
-    setStatus(`Ready as ${DEMO_USERNAME} · Live`)
+    setStatus(`Ready as ${DEMO_USERNAME} — press Play to run the demo.`)
   }, [token])
 
   useEffect(() => {
@@ -127,99 +141,95 @@ function App() {
     }
   }, [token])
 
-  useEffect(() => {
-    function onKey(event: KeyboardEvent) {
-      if (!event.shiftKey) {
-        return
-      }
-      const target = event.target as HTMLElement | null
-      const tag = target?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA') {
-        return
-      }
-      const key = event.key.toLowerCase()
-      if (key === 'p') {
-        event.preventDefault()
-        void triggerSystemMessage(SCENE_A_PING, 'Scene A ping queued')
-      } else if (key === 'c') {
-        event.preventDefault()
-        setArmedScript('scene-c')
-        setStatus('Scene C armed — next send will reply with scripted coach line.')
-      } else if (key === 'l') {
-        event.preventDefault()
-        setArmedScript(null)
-        setStatus('Live mode — next send goes through the LLM (Scene G).')
-      } else if (key === 'q') {
-        event.preventDefault()
-        setQuizOpen(true)
-      } else if (key === 'f') {
-        event.preventDefault()
-        void triggerSystemMessage(SCENE_F_MOOD_PING, 'Scene F mood ping queued')
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [token])
-
-  async function triggerSystemMessage(content: string, logLabel: string) {
+  async function postJSON(url: string, body: unknown) {
     if (!token) {
-      return
+      throw new Error('not logged in')
     }
-    try {
-      const response = await fetch('/demo/system-message', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ content }),
-      })
-      if (!response.ok) {
-        throw new Error(`system-message ${response.status}`)
-      }
-      setStatus(logLabel)
-    } catch (err) {
-      setStatus(`${logLabel} failed: ${toMessage(err)}`)
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    })
+    if (!response.ok) {
+      throw new Error(`${url} ${response.status}`)
     }
+    return response
   }
 
-  async function handleSend(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!token || !draft.trim() || isSending) {
+  async function sendScriptedTurn(userContent: string, systemContent: string) {
+    await postJSON('/demo/scripted-turn', {
+      user_content: userContent,
+      system_content: systemContent,
+    })
+  }
+
+  async function sendSystemMessage(content: string) {
+    await postJSON('/demo/system-message', { content })
+  }
+
+  async function saveQuizResults(correctCount: number, total: number) {
+    await postJSON('/demo/quiz-results', {
+      title: FALLBACK_QUIZ.title,
+      topic: FALLBACK_QUIZ.topic,
+      estimated_duration_minutes: 5,
+      questions: FALLBACK_QUIZ.questions,
+      correct_answers: correctCount,
+      false_answers: total - correctCount,
+    })
+  }
+
+  async function runFullDemo() {
+    if (!token || isAutoRunning) {
       return
     }
-    const outgoing = draft.trim()
-    const scripted = armedRef.current
-    setDraft('')
-    setIsSending(true)
-    setStatus(scripted ? 'Scripted reply...' : 'Live LLM reply...')
-
+    setIsAutoRunning(true)
     try {
-      if (scripted === 'scene-c') {
-        const response = await fetch('/demo/scripted-turn', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            user_content: outgoing,
-            system_content: SCENE_C_REPLY,
-          }),
-        })
-        if (!response.ok) {
-          throw new Error(`scripted-turn ${response.status}`)
-        }
-        setArmedScript(null)
-        setStatus('Scene C fired.')
-      } else {
+      setStatus('Scene A — TumTum proactive ping')
+      await sendSystemMessage(SCENE_A_PING)
+      await sleep(3500)
+
+      setStatus('Scene B — Odin replies')
+      await typeInto(setDraft, SCENE_B_USER_LINE)
+      await sleep(500)
+
+      setStatus('Scene C — scripted coach reply')
+      const outgoing = SCENE_B_USER_LINE
+      setDraft('')
+      await sendScriptedTurn(outgoing, SCENE_C_REPLY)
+      await sleep(4000)
+
+      setStatus('Scene D — 3-question MC quiz')
+      setQuizAutoPlay(true)
+      setQuizOpen(true)
+      const quizDone = new Promise<void>((resolve) => {
+        quizDoneResolverRef.current = resolve
+      })
+      await quizDone
+
+      setStatus('Scene E — performance recap (auto-fires from quiz)')
+      await sleep(4500)
+
+      setStatus('Scene F — mood check-in')
+      await sendSystemMessage(SCENE_F_MOOD_PING)
+      await sleep(3500)
+
+      setStatus('Scene G — live LLM adaptive reply')
+      await typeInto(setDraft, SCENE_G_USER_LINE)
+      await sleep(500)
+      const live = SCENE_G_USER_LINE
+      setDraft('')
+      setIsSending(true)
+      try {
         const response = await fetch('/chat/messages', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ content: outgoing }),
+          body: JSON.stringify({ content: live }),
         })
         if (!response.ok) {
           throw new Error(`chat ${response.status}`)
@@ -234,8 +244,49 @@ function App() {
           }
           return next
         })
-        setStatus('Live LLM reply delivered.')
+      } finally {
+        setIsSending(false)
       }
+      setStatus('Demo complete.')
+    } catch (err) {
+      setStatus(`Demo run failed: ${toMessage(err)}`)
+    } finally {
+      setIsAutoRunning(false)
+    }
+  }
+
+  async function handleSend(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!token || !draft.trim() || isSending) {
+      return
+    }
+    const outgoing = draft.trim()
+    setDraft('')
+    setIsSending(true)
+    setStatus('Live LLM reply...')
+    try {
+      const response = await fetch('/chat/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ content: outgoing }),
+      })
+      if (!response.ok) {
+        throw new Error(`chat ${response.status}`)
+      }
+      const body = (await response.json()) as ChatReplyResponse
+      setMessages((current) => {
+        const next = [...current]
+        for (const message of [body.user_message, body.assistant_message]) {
+          if (!next.some((m) => m.id === message.id)) {
+            next.push(message)
+          }
+        }
+        return next
+      })
+      setStatus('Live LLM reply delivered.')
     } catch (err) {
       setDraft(outgoing)
       setStatus(`Send failed: ${toMessage(err)}`)
@@ -246,37 +297,28 @@ function App() {
 
   async function handleQuizComplete(answers: number[]) {
     setQuizOpen(false)
+    setQuizAutoPlay(false)
     const correctCount = answers.reduce(
       (acc, choice, idx) => acc + (choice === FALLBACK_QUIZ.questions[idx].correct_index ? 1 : 0),
       0,
     )
     try {
-      await fetch('/demo/quiz-results', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          title: FALLBACK_QUIZ.title,
-          topic: FALLBACK_QUIZ.topic,
-          estimated_duration_minutes: 5,
-          questions: FALLBACK_QUIZ.questions,
-          correct_answers: correctCount,
-          false_answers: answers.length - correctCount,
-        }),
-      })
+      await saveQuizResults(correctCount, answers.length)
       setStatus(`Quiz saved: ${correctCount}/${answers.length}`)
     } catch (err) {
       setStatus(`Quiz save failed: ${toMessage(err)}`)
     }
-
-    setTimeout(() => {
-      void triggerSystemMessage(
+    await sleep(700)
+    try {
+      await sendSystemMessage(
         `${SCENE_E_RECAP_PREFIX}${correctCount}/${answers.length} on the powerset drill.${SCENE_E_RECAP_BODY}`,
-        'Scene E recap queued',
       )
-    }, 600)
+    } catch (err) {
+      setStatus(`Scene E recap failed: ${toMessage(err)}`)
+    }
+    const resolver = quizDoneResolverRef.current
+    quizDoneResolverRef.current = null
+    resolver?.()
   }
 
   return (
@@ -287,9 +329,14 @@ function App() {
           <h1>Chat with Odin</h1>
         </div>
         <div className="status-pill" aria-live="polite">
-          <span className={armedScript ? 'pill pill-armed' : 'pill pill-live'}>
-            {armedScript === 'scene-c' ? 'Scene C armed' : 'Live'}
-          </span>
+          <button
+            type="button"
+            className="play-button"
+            onClick={() => void runFullDemo()}
+            disabled={!token || isAutoRunning}
+          >
+            {isAutoRunning ? '▸ Running demo...' : '▶ Play demo'}
+          </button>
           <span className="status-text">{status}</span>
         </div>
       </header>
@@ -298,7 +345,7 @@ function App() {
         <div className="message-list" ref={listRef}>
           {messages.length === 0 ? (
             <div className="empty-state">
-              <p>No messages yet.</p>
+              <p>No messages yet — press Play demo to start.</p>
             </div>
           ) : (
             messages.map((message) => (
@@ -331,19 +378,15 @@ function App() {
                 void handleSend(event as unknown as FormEvent<HTMLFormElement>)
               }
             }}
-            placeholder={
-              armedScript === 'scene-c'
-                ? 'Type anything — scripted coach line will reply.'
-                : 'Write a message...'
-            }
+            placeholder="Write a message..."
             rows={3}
-            disabled={!token || isSending}
+            disabled={!token || isSending || isAutoRunning}
           />
           <div className="composer-actions">
             <p className="helper-text">
-              Shift+P ping · Shift+C arm · Shift+Q quiz · Shift+F mood · Shift+L live
+              Press ▶ Play demo for the full scripted 7-scene run.
             </p>
-            <button type="submit" disabled={!token || isSending || !draft.trim()}>
+            <button type="submit" disabled={!token || isSending || isAutoRunning || !draft.trim()}>
               {isSending ? 'Sending...' : 'Send'}
             </button>
           </div>
@@ -354,7 +397,11 @@ function App() {
         <QuizOverlay
           questions={FALLBACK_QUIZ.questions}
           title={FALLBACK_QUIZ.title}
-          onClose={() => setQuizOpen(false)}
+          autoPlay={quizAutoPlay}
+          onClose={() => {
+            setQuizOpen(false)
+            setQuizAutoPlay(false)
+          }}
           onComplete={handleQuizComplete}
         />
       ) : null}
@@ -365,11 +412,12 @@ function App() {
 type QuizOverlayProps = {
   questions: DemoQuizQuestion[]
   title: string
+  autoPlay?: boolean
   onClose: () => void
   onComplete: (answers: number[]) => void
 }
 
-function QuizOverlay({ questions, title, onClose, onComplete }: QuizOverlayProps) {
+function QuizOverlay({ questions, title, autoPlay, onClose, onComplete }: QuizOverlayProps) {
   const [index, setIndex] = useState(0)
   const [answers, setAnswers] = useState<number[]>([])
   const [selected, setSelected] = useState<number | null>(null)
@@ -378,15 +426,50 @@ function QuizOverlay({ questions, title, onClose, onComplete }: QuizOverlayProps
   const isLast = index === questions.length - 1
   const revealed = selected !== null
 
+  useEffect(() => {
+    if (!autoPlay) {
+      return
+    }
+    let cancelled = false
+    const pickDelay = 1400
+    const nextDelay = 2200
+
+    async function autoStep() {
+      await sleep(pickDelay)
+      if (cancelled) {
+        return
+      }
+      const correct = current.correct_index
+      setSelected(correct)
+      await sleep(nextDelay)
+      if (cancelled) {
+        return
+      }
+      const nextAnswers = [...answers, correct]
+      if (isLast) {
+        onComplete(nextAnswers)
+        return
+      }
+      setAnswers(nextAnswers)
+      setSelected(null)
+      setIndex((i) => i + 1)
+    }
+
+    void autoStep()
+    return () => {
+      cancelled = true
+    }
+  }, [autoPlay, index, current, answers, isLast, onComplete])
+
   function handleSelect(optionIdx: number) {
-    if (revealed) {
+    if (revealed || autoPlay) {
       return
     }
     setSelected(optionIdx)
   }
 
   function handleNext() {
-    if (selected === null) {
+    if (selected === null || autoPlay) {
       return
     }
     const nextAnswers = [...answers, selected]
@@ -404,7 +487,7 @@ function QuizOverlay({ questions, title, onClose, onComplete }: QuizOverlayProps
       <div className="quiz-card">
         <header className="quiz-header">
           <p className="eyebrow">{title}</p>
-          <button type="button" className="ghost-button" onClick={onClose}>
+          <button type="button" className="ghost-button" onClick={onClose} disabled={autoPlay}>
             Close
           </button>
         </header>
@@ -432,7 +515,7 @@ function QuizOverlay({ questions, title, onClose, onComplete }: QuizOverlayProps
                 type="button"
                 className={className}
                 onClick={() => handleSelect(optIdx)}
-                disabled={revealed}
+                disabled={revealed || autoPlay}
               >
                 <span className="quiz-option-letter">{String.fromCharCode(65 + optIdx)}</span>
                 <span>{option}</span>
@@ -452,11 +535,7 @@ function QuizOverlay({ questions, title, onClose, onComplete }: QuizOverlayProps
           </div>
         ) : null}
         <div className="quiz-actions">
-          <button
-            type="button"
-            onClick={handleNext}
-            disabled={selected === null}
-          >
+          <button type="button" onClick={handleNext} disabled={selected === null || autoPlay}>
             {isLast ? 'Finish quiz' : 'Next question'}
           </button>
         </div>

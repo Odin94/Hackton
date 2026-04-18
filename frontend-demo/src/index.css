@@ -1,19 +1,4 @@
-:root {
-  font-family:
-    "IBM Plex Sans",
-    "Avenir Next",
-    "Segoe UI",
-    sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-  color: #221913;
-  background: #f3ede1;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
+/* Global reset; theme lives in App.css. */
 * {
   box-sizing: border-box;
 }
@@ -26,38 +11,18 @@ body,
 
 body {
   margin: 0;
+  background: #09090b;
 }
 
 h1,
-h2 {
-  font-family:
-    "Iowan Old Style",
-    "Palatino Linotype",
-    serif;
-  line-height: 0.98;
-  letter-spacing: -0.04em;
+h2,
+h3,
+h4 {
   margin: 0;
-}
-
-h1 {
-  font-size: clamp(3rem, 7vw, 5.3rem);
-}
-
-h2 {
-  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 600;
 }
 
 p,
 code {
   margin: 0;
-}
-
-code {
-  padding: 0.1rem 0.35rem;
-  border-radius: 0.5rem;
-  background: rgba(255, 255, 255, 0.12);
-  font-family:
-    "IBM Plex Mono",
-    "SFMono-Regular",
-    monospace;
 }
