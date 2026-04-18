@@ -85,23 +85,7 @@ function App() {
     if (!token) {
       return
     }
-    void (async () => {
-      try {
-        const response = await fetch('/chat/history', {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        if (!response.ok) {
-          throw new Error(`history ${response.status}`)
-        }
-        const body = (await response.json()) as { messages: ChatMessage[] }
-        setMessages(body.messages)
-        setStatus(`Logged in as ${DEMO_USERNAME} · ${body.messages.length} messages`)
-      } catch (err) {
-        setStatus(`History load failed: ${toMessage(err)}`)
-        localStorage.removeItem(TOKEN_KEY)
-        setToken('')
-      }
-    })()
+    setStatus(`Ready as ${DEMO_USERNAME} · Live`)
   }, [token])
 
   useEffect(() => {
@@ -314,7 +298,7 @@ function App() {
         <div className="message-list" ref={listRef}>
           {messages.length === 0 ? (
             <div className="empty-state">
-              <p>Loading history...</p>
+              <p>No messages yet.</p>
             </div>
           ) : (
             messages.map((message) => (
