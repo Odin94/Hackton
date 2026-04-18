@@ -18,6 +18,7 @@ from agent.models import (
     ChatMessage,
     Course,
     Deadline,
+    DemoConversationState,
     Notification,
     Quiz,
     QuizResult,
@@ -34,6 +35,12 @@ _COURSE_NOTIFICATION_MARKER = "What courses do you have?"
 _SCHEDULE_NOTIFICATION_MARKER = "Please share the schedule for all of your courses"
 _DEADLINE_NOTIFICATION_MARKER = "Please share any deadlines or exam dates"
 _VALID_EVENT_TYPES = ("lecture", "tutorium", "study session")
+_DEMO_STATUS_AWAITING_SLIDES = "awaiting_slides_progress"
+_DEMO_STATUS_AWAITING_QUIZ = "awaiting_quiz_answers"
+_DEMO_STATUS_AWAITING_ENERGY = "awaiting_energy_checkin"
+_DEMO_STATUS_COMPLETE = "complete"
+_DEMO_DEFAULT_AVERAGE_SCORE_PERCENT = 72
+_DEMO_MINUTES_PER_QUESTION = 2
 
 
 @dataclass
@@ -41,6 +48,7 @@ class ToolEvent:
     tool_name: str
     status: str
     detail: str
+    surface_to_user: bool = True
 
 _CHAT_TOOLS: list[dict[str, Any]] = [
     {
@@ -131,6 +139,61 @@ _CHAT_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_demo_quiz",
+            "description": (
+                "During the scripted demo flow, generate and store a grounded quiz from the "
+                "materials dataset for the active demo course. Use this instead of inventing a quiz."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "coverage_percent": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "question_count": {"type": "integer", "minimum": 1, "maximum": 5},
+                },
+                "required": ["coverage_percent"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_demo_quiz_result",
+            "description": (
+                "Persist the graded result for the active demo quiz after comparing the user's "
+                "answers against the stored answer key."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "correct_answers": {"type": "integer", "minimum": 0},
+                    "false_answers": {"type": "integer", "minimum": 0},
+                },
+                "required": ["correct_answers", "false_answers"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_demo_flow",
+            "description": (
+                "Mark the scripted demo flow complete after giving the final energy-based recommendation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["library_study_session", "rest_and_recover"],
+                    }
+                },
+                "required": ["outcome"],
+            },
+        },
+    },
 ]
 
 
@@ -159,6 +222,8 @@ def _usage_from_response(response: Any) -> dict[str, int]:
 def _format_tool_feedback(tool_events: list[ToolEvent]) -> str:
     lines: list[str] = []
     for event in tool_events:
+        if not event.surface_to_user:
+            continue
         label = event.tool_name.replace("_", " ")
         if event.status == "success":
             lines.append(f"{label}: {event.detail}")
@@ -338,6 +403,255 @@ async def deliver_due_notifications_as_chat_messages(user_id: int) -> list[ChatM
         return delivered_messages
 
 
+async def activate_demo_conversation(
+    user_id: int,
+    *,
+    course_name: str,
+    average_score_percent: int = _DEMO_DEFAULT_AVERAGE_SCORE_PERCENT,
+) -> tuple[Notification, list[ChatMessage]]:
+    cleaned_course_name = course_name.strip()
+    if not cleaned_course_name:
+        raise ValueError("course_name cannot be empty")
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(Notification)
+            .where(
+                Notification.user_id == user_id,
+                Notification.status == "pending",
+                Notification.quiz_id.is_(None),
+                (
+                    Notification.content.contains(_COURSE_NOTIFICATION_MARKER)
+                    | Notification.content.contains(_SCHEDULE_NOTIFICATION_MARKER)
+                    | Notification.content.contains(_DEADLINE_NOTIFICATION_MARKER)
+                    | Notification.content.contains("Hey you finished your ")
+                ),
+            )
+            .values(status="complete")
+        )
+        state = await session.scalar(
+            select(DemoConversationState).where(DemoConversationState.user_id == user_id)
+        )
+        if state is None:
+            state = DemoConversationState(
+                user_id=user_id,
+                status=_DEMO_STATUS_AWAITING_SLIDES,
+                course_name=cleaned_course_name,
+                coverage_percent=None,
+                quiz_id=None,
+                average_score_percent=average_score_percent,
+            )
+            session.add(state)
+        else:
+            state.status = _DEMO_STATUS_AWAITING_SLIDES
+            state.course_name = cleaned_course_name
+            state.coverage_percent = None
+            state.quiz_id = None
+            state.average_score_percent = average_score_percent
+
+        notification = Notification(
+            user_id=user_id,
+            status="pending",
+            target_datetime=datetime.now(UTC),
+            content=(
+                f"Hey you finished your {cleaned_course_name} lecture 20 minutes ago! "
+                "Did you get through today's slides?"
+            ),
+            quiz_id=None,
+        )
+        session.add(notification)
+        await session.commit()
+        await session.refresh(notification)
+
+    delivered = await deliver_due_notifications_as_chat_messages(user_id)
+    return notification, delivered
+
+
+async def _demo_state_for_user(
+    session: AsyncSession,
+    user_id: int,
+) -> DemoConversationState | None:
+    return await session.scalar(
+        select(DemoConversationState).where(DemoConversationState.user_id == user_id)
+    )
+
+
+def _demo_quiz_topic_for_course(course_name: str) -> str:
+    lowered = course_name.casefold()
+    if "machine learning" in lowered or lowered == "ml":
+        return "transformers"
+    if "rechnerarchitektur" in lowered:
+        return "assembler"
+    return course_name
+
+
+def _demo_status_label(status: str) -> str:
+    mapping = {
+        _DEMO_STATUS_AWAITING_SLIDES: "awaiting slides progress update",
+        _DEMO_STATUS_AWAITING_QUIZ: "awaiting quiz answers",
+        _DEMO_STATUS_AWAITING_ENERGY: "awaiting energy check-in",
+        _DEMO_STATUS_COMPLETE: "complete",
+    }
+    return mapping.get(status, status)
+
+
+def _render_quiz_questions(questions: list[dict[str, Any]]) -> str:
+    return "\n\n".join(
+        f"{index}. {str(question.get('question', '')).strip()}"
+        for index, question in enumerate(questions, start=1)
+    )
+
+
+async def _create_demo_quiz(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    coverage_percent: int,
+    question_count: int,
+) -> tuple[Quiz, DemoConversationState, str]:
+    state = await _demo_state_for_user(session, user_id)
+    if state is None:
+        raise ValueError("demo mode is not active for this user")
+    if state.status not in {_DEMO_STATUS_AWAITING_SLIDES, _DEMO_STATUS_AWAITING_QUIZ}:
+        raise ValueError("demo quiz generation is not expected at the current demo stage")
+
+    quiz_topic = _demo_quiz_topic_for_course(state.course_name)
+    items = await cognee_service.generate_quiz(quiz_topic, n=question_count)
+    quiz = Quiz(
+        user_id=user_id,
+        title=f"Demo quiz: {state.course_name}",
+        topic=f"{state.course_name} first {coverage_percent}% of slides",
+        estimated_duration_minutes=max(1, len(items)) * _DEMO_MINUTES_PER_QUESTION,
+        questions=[item.model_dump() for item in items],
+    )
+    session.add(quiz)
+    await session.flush()
+
+    state.coverage_percent = coverage_percent
+    state.quiz_id = quiz.id
+    state.status = _DEMO_STATUS_AWAITING_QUIZ
+    await session.flush()
+
+    question_block = _render_quiz_questions(quiz.questions)
+    detail = (
+        f"Stored demo quiz quiz_id={quiz.id} for course={state.course_name!r}, "
+        f"coverage={coverage_percent}%, topic={quiz_topic!r}. "
+        "Present the quiz as open-ended questions only. Do not invent multiple-choice options. "
+        "After the questions, instruct the user to reply with numbered free-text answers like "
+        "`1. ... 2. ... 3. ...`.\n"
+        f"Questions:\n{question_block}"
+    )
+    return quiz, state, detail
+
+
+async def _record_demo_quiz_result(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    correct_answers: int,
+    false_answers: int,
+) -> tuple[DemoConversationState, str]:
+    state = await _demo_state_for_user(session, user_id)
+    if state is None or state.quiz_id is None:
+        raise ValueError("no active demo quiz exists for this user")
+    if state.status != _DEMO_STATUS_AWAITING_QUIZ:
+        raise ValueError("demo quiz results are not expected at the current demo stage")
+
+    if correct_answers < 0 or false_answers < 0:
+        raise ValueError("quiz result counts cannot be negative")
+    total_answers = correct_answers + false_answers
+    if total_answers < 1:
+        raise ValueError("quiz result must contain at least one graded answer")
+
+    score_percent = round((correct_answers / total_answers) * 100)
+    previous_average = await session.scalar(
+        select(
+            func.avg(
+                (QuizResult.correct_answers * 100.0)
+                / (QuizResult.correct_answers + QuizResult.false_answers)
+            )
+        )
+        .where(QuizResult.user_id == user_id)
+        .where(QuizResult.quiz_id != state.quiz_id)
+    )
+    average_score = (
+        int(round(previous_average))
+        if previous_average is not None
+        else state.average_score_percent
+    )
+    comparison = "better" if score_percent >= average_score else "worse"
+
+    result = QuizResult(
+        user_id=user_id,
+        quiz_id=state.quiz_id,
+        correct_answers=correct_answers,
+        false_answers=false_answers,
+        quiz_taken_datetime=datetime.now(UTC),
+    )
+    session.add(result)
+    state.status = _DEMO_STATUS_AWAITING_ENERGY
+    await session.flush()
+
+    detail = (
+        f"Recorded demo quiz result for quiz_id={state.quiz_id}: "
+        f"correct={correct_answers}, false={false_answers}, score={score_percent}%. "
+        f"Historical average before this quiz={average_score}%, so this performance is {comparison}."
+    )
+    return state, detail
+
+
+async def _complete_demo_flow(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    outcome: str,
+    demo_status_at_turn_start: str | None,
+) -> str:
+    state = await _demo_state_for_user(session, user_id)
+    if state is None:
+        raise ValueError("demo mode is not active for this user")
+    if demo_status_at_turn_start != _DEMO_STATUS_AWAITING_ENERGY:
+        raise ValueError(
+            "demo flow can only be completed on a turn that started after the energy question"
+        )
+    state.status = _DEMO_STATUS_COMPLETE
+    await session.flush()
+    return f"Marked demo flow complete with outcome={outcome}."
+
+
+def _build_demo_prompt(state: DemoConversationState) -> str:
+    quiz_topic = _demo_quiz_topic_for_course(state.course_name)
+    return (
+        "A special scripted demo flow is active. Follow this conversation arc while still "
+        "replying naturally:\n"
+        f"- Demo course label: {state.course_name}\n"
+        f"- Grounded quiz topic to use from the materials dataset: {quiz_topic}\n"
+        f"- Current demo stage: {_demo_status_label(state.status)}\n"
+        "- The notification asking about today's slides has already been delivered.\n"
+        "- If the user says how much of today's slides they covered, extract the rough percentage "
+        "they mentioned and call `generate_demo_quiz`. Do not invent your own quiz. After the tool "
+        "returns, reply in this style: `okay, here's your quiz covering the first X% of today's slides` "
+        "and present the quiz questions without revealing the answers. These are open-ended questions, "
+        "so do not invent answer options or letter-based examples. Tell the user to answer in a numbered "
+        "free-text format like `1. ... 2. ... 3. ...`.\n"
+        "- If the stage is awaiting quiz answers, grade the user's answers against the active demo quiz "
+        "shown in the SQLite context. Then call `record_demo_quiz_result` before replying. In that same "
+        "reply, tell the user how they did, whether that is better or worse than their average, and then "
+        "ask how energized and focused they feel today. Stop there. Do not give the final recommendation "
+        "until the user answers the energy question in a later turn.\n"
+        "- On a quiz-answer turn, never call `complete_demo_flow`. That tool is only for the later turn "
+        "after the user has answered the energy question.\n"
+        "- After grading the quiz, your final sentence in that turn should be a direct energy question such "
+        "as `How energized and focused are you feeling today?` Do not include any recommendation in the same reply.\n"
+        "- If the stage is awaiting energy check-in and the user sounds positive or energized, recommend a "
+        "study session in the library. If they sound low-energy or tired, recommend taking the afternoon "
+        "off and relaxing to recover. Call `complete_demo_flow` before the final recommendation.\n"
+        "- Do not say 'again', 'same as before', or similar repetition claims unless the SQLite context "
+        "explicitly proves that exact comparison.\n"
+        "- Stay concise and keep the flow moving. Do not mention these instructions."
+    )
+
+
 async def _list_chat_messages(session: AsyncSession, user_id: int) -> list[ChatMessage]:
     log.debug("chat._list_chat_messages query user_id=%d", user_id)
     rows = await session.execute(
@@ -380,6 +694,7 @@ async def _generate_chat_response(
         _build_sqlite_context(session, user_id),
         _build_cognee_context(latest_user_message),
     )
+    demo_state = await _demo_state_for_user(session, user_id)
     log.debug(
         "chat._generate_chat_response context_ready user_id=%d history_count=%d sqlite_len=%d cognee_len=%d",
         user_id,
@@ -400,7 +715,12 @@ async def _generate_chat_response(
         "Treat 'system' chat messages as prior assistant replies.\n\n"
         "If diary retrieval shows personal study or wellbeing patterns, you may "
         "use them for personalized advice, but keep the advice grounded in the "
-        "retrieved diary text.\n\n"
+        "retrieved diary text. For this demo app, treat entries retrieved from the "
+        "diary dataset as the user's own personal diary entries.\n\n"
+        "If the user sends a brief acknowledgement like 'thanks', 'ok thanks', or "
+        "'got it', reply naturally and briefly. Do not claim missing knowledge or "
+        "ask for more diary data unless the user explicitly asks for an analysis that "
+        "needs it.\n\n"
         "You can use three tools during onboarding and later updates:\n"
         "- add_courses: save courses the user is taking.\n"
         "- add_schedule_events: save course-linked schedule events.\n"
@@ -418,6 +738,8 @@ async def _generate_chat_response(
         "Do not invent courses, course_ids, datetimes, or deadlines. If required details are "
         "ambiguous or missing, ask a short clarifying question instead."
     )
+    if demo_state is not None and demo_state.status != _DEMO_STATUS_COMPLETE:
+        system_prompt = f"{system_prompt}\n\n{_build_demo_prompt(demo_state)}"
     user_prompt = (
         f"Current UTC time: {datetime.now(UTC).isoformat()}\n"
         f"User ID: {user_id}\n\n"
@@ -435,6 +757,10 @@ async def _generate_chat_response(
     usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     for turn in range(1, 5):
+        current_demo_state = await _demo_state_for_user(session, user_id)
+        demo_status_at_turn_start = (
+            current_demo_state.status if current_demo_state is not None else None
+        )
         log.debug(
             "chat._generate_chat_response llm_turn_start user_id=%d turn=%d messages=%d latest_preview=%r",
             user_id,
@@ -474,8 +800,9 @@ async def _generate_chat_response(
                 raise cognee_service.MalformedLLMResponseError(
                     "chat generation returned empty content"
                 )
-            if tool_events:
-                cleaned = f"{_format_tool_feedback(tool_events)}\n\n{cleaned}"
+            tool_feedback = _format_tool_feedback(tool_events)
+            if tool_feedback:
+                cleaned = f"{tool_feedback}\n\n{cleaned}"
             cleaned = _append_usage_footer(cleaned, usage_totals)
             log.debug(
                 "chat._generate_chat_response done user_id=%d turn=%d final_preview=%r",
@@ -528,7 +855,11 @@ async def _generate_chat_response(
                 continue
 
             result, tool_event = await _dispatch_tool_call(
-                session, user_id, tool_call.function.name, args
+                session,
+                user_id,
+                tool_call.function.name,
+                args,
+                demo_status_at_turn_start=demo_status_at_turn_start,
             )
             tool_events.append(tool_event)
             log.debug(
@@ -547,7 +878,7 @@ async def _generate_chat_response(
             )
 
     if tool_events:
-        fallback = _format_tool_feedback(tool_events)
+        fallback = _format_tool_feedback(tool_events) or "The requested tool actions completed."
         fallback = _append_usage_footer(fallback, usage_totals)
         log.warning(
             "chat._generate_chat_response fallback_after_tool_calls user_id=%d tool_event_count=%d fallback_preview=%r",
@@ -607,6 +938,8 @@ async def _dispatch_tool_call(
     user_id: int,
     tool_name: str,
     args: dict[str, Any],
+    *,
+    demo_status_at_turn_start: str | None = None,
 ) -> tuple[str, ToolEvent]:
     log.debug(
         "chat._dispatch_tool_call user_id=%d tool=%s arg_keys=%s",
@@ -689,6 +1022,105 @@ async def _dispatch_tool_call(
                 "Failed to add deadlines because the provided deadline details were invalid: "
                 f"{e}. Ask the user for explicit course names and exact dates or times."
             ), ToolEvent(tool_name=tool_name, status="error", detail=detail)
+
+    if tool_name == "generate_demo_quiz":
+        try:
+            question_count = int(args.get("question_count", 3))
+            if question_count < 1:
+                raise ValueError("question_count must be >= 1")
+            coverage_percent = int(args["coverage_percent"])
+            _, _, detail = await _create_demo_quiz(
+                session,
+                user_id,
+                coverage_percent=coverage_percent,
+                question_count=question_count,
+            )
+            return detail, ToolEvent(
+                tool_name=tool_name,
+                status="success",
+                detail="generated grounded demo quiz",
+                surface_to_user=False,
+            )
+        except (ValueError, cognee_service.CogneeServiceError) as e:
+            log.warning(
+                "chat._dispatch_tool_call demo_quiz_error user_id=%d tool=%s error=%s args=%r",
+                user_id,
+                tool_name,
+                e,
+                args,
+            )
+            return (
+                "Failed to generate the grounded demo quiz. Ask the user to try again in a moment "
+                "or use a clearer lecture topic."
+            ), ToolEvent(
+                tool_name=tool_name,
+                status="error",
+                detail=str(e),
+                surface_to_user=False,
+            )
+
+    if tool_name == "record_demo_quiz_result":
+        try:
+            _, detail = await _record_demo_quiz_result(
+                session,
+                user_id,
+                correct_answers=int(args["correct_answers"]),
+                false_answers=int(args["false_answers"]),
+            )
+            return detail, ToolEvent(
+                tool_name=tool_name,
+                status="success",
+                detail="recorded demo quiz result",
+                surface_to_user=False,
+            )
+        except ValueError as e:
+            log.warning(
+                "chat._dispatch_tool_call demo_result_error user_id=%d tool=%s error=%s args=%r",
+                user_id,
+                tool_name,
+                e,
+                args,
+            )
+            return (
+                "Failed to record the demo quiz result. Re-check the grading and try again."
+            ), ToolEvent(
+                tool_name=tool_name,
+                status="error",
+                detail=str(e),
+                surface_to_user=False,
+            )
+
+    if tool_name == "complete_demo_flow":
+        try:
+            detail = await _complete_demo_flow(
+                session,
+                user_id,
+                outcome=str(args["outcome"]).strip(),
+                demo_status_at_turn_start=demo_status_at_turn_start,
+            )
+            return detail, ToolEvent(
+                tool_name=tool_name,
+                status="success",
+                detail="completed demo flow",
+                surface_to_user=False,
+            )
+        except ValueError as e:
+            log.warning(
+                "chat._dispatch_tool_call demo_complete_error user_id=%d tool=%s error=%s args=%r",
+                user_id,
+                tool_name,
+                e,
+                args,
+            )
+            return (
+                "Failed to complete the demo flow state. Ask the user how they feel first, then "
+                "wait for that answer before giving the final recommendation."
+            ), ToolEvent(
+                tool_name=tool_name,
+                status="error",
+                detail=str(e),
+                surface_to_user=False,
+            )
 
     else:
         log.warning("chat._dispatch_tool_call unknown_tool user_id=%d tool=%s", user_id, tool_name)
@@ -1085,6 +1517,12 @@ async def _build_sqlite_context(session: AsyncSession, user_id: int) -> str:
         .scalars()
         .all()
     )
+    demo_state = await _demo_state_for_user(session, user_id)
+    active_demo_quiz = (
+        await session.get(Quiz, demo_state.quiz_id)
+        if demo_state is not None and demo_state.quiz_id is not None
+        else None
+    )
 
     lines = [
         f"User: username={user.username!r}, name={user.name!r}, email={user.email!r}",
@@ -1166,6 +1604,31 @@ async def _build_sqlite_context(session: AsyncSession, user_id: int) -> str:
         )
     else:
         lines.append("- none")
+
+    lines.append("Demo conversation state:")
+    if demo_state is None:
+        lines.append("- none")
+    else:
+        lines.append(
+            f"- status={demo_state.status}, course={demo_state.course_name}, "
+            f"coverage_percent={demo_state.coverage_percent}, quiz_id={demo_state.quiz_id}, "
+            f"average_score_percent={demo_state.average_score_percent}"
+        )
+    lines.append("Active demo quiz:")
+    if active_demo_quiz is None:
+        lines.append("- none")
+    else:
+        lines.append(
+            f"- quiz_id={active_demo_quiz.id}, title={active_demo_quiz.title}, "
+            f"topic={active_demo_quiz.topic}, question_count={len(active_demo_quiz.questions)}"
+        )
+        for index, question in enumerate(active_demo_quiz.questions, start=1):
+            lines.append(
+                f"  question_{index}: {str(question.get('question', '')).strip()}"
+            )
+            lines.append(
+                f"  answer_{index}: {str(question.get('answer', '')).strip()}"
+            )
 
     context = "\n".join(lines)
     log.debug(

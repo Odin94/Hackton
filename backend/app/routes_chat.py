@@ -9,7 +9,12 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import get_user_id
-from app.chat_service import create_chat_reply, list_chat_messages, serialize_chat_message
+from app.chat_service import (
+    activate_demo_conversation,
+    create_chat_reply,
+    list_chat_messages,
+    serialize_chat_message,
+)
 from app.cognee_service import CogneeServiceError
 
 log = logging.getLogger(__name__)
@@ -38,6 +43,14 @@ class ChatReq(BaseModel):
 class ChatReplyResp(BaseModel):
     user_message: ChatMessageResp
     assistant_message: ChatMessageResp
+
+
+class DemoTriggerReq(BaseModel):
+    course_name: str = Field(min_length=1, max_length=256)
+
+
+class DemoTriggerResp(BaseModel):
+    notification_message: ChatMessageResp | None = None
 
 
 def _require_user_id(authorization: str | None) -> int:
@@ -106,4 +119,26 @@ async def post_chat_message(
     return ChatReplyResp(
         user_message=_serialize(user_message),
         assistant_message=_serialize(assistant_message, processing_ms=processing_ms),
+    )
+
+
+@router.post("/chat/demo-trigger", response_model=DemoTriggerResp, summary="Trigger the scripted demo flow")
+async def post_chat_demo_trigger(
+    req: DemoTriggerReq,
+    authorization: str | None = Header(default=None),
+) -> DemoTriggerResp:
+    user_id = _require_user_id(authorization)
+    try:
+        _, delivered_messages = await activate_demo_conversation(
+            user_id,
+            course_name=req.course_name,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    notification_message = delivered_messages[-1] if delivered_messages else None
+    return DemoTriggerResp(
+        notification_message=(
+            _serialize(notification_message) if notification_message is not None else None
+        )
     )

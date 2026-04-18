@@ -11,10 +11,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent.database import Base
-from agent.models import ChatMessage, Course, Deadline, Notification, ScheduleEvent, User
+from agent.models import (
+    ChatMessage,
+    Course,
+    Deadline,
+    DemoConversationState,
+    Notification,
+    Quiz,
+    QuizResult,
+    ScheduleEvent,
+    User,
+)
 from app import chat_service, routes_auth, routes_chat
 from app.routes_auth import router as auth_router
 from app.routes_chat import router as chat_router
+from app.types import QuizItem
 
 
 @pytest.fixture
@@ -464,3 +475,284 @@ def test_post_chat_message_recovers_from_invalid_schedule_tool_call(
 
     events = asyncio.run(_load_events())
     assert events == []
+
+
+def test_demo_trigger_schedules_and_delivers_chat_notification(client: TestClient) -> None:
+    user = _insert_user(client, "demo_user")
+    token = _login(client, "demo_user")
+
+    response = client.post(
+        "/chat/demo-trigger",
+        json={"course_name": "Algorithms"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["notification_message"]["author"] == "system"
+    assert (
+        body["notification_message"]["content"]
+        == "Hey you finished your Algorithms lecture 20 minutes ago! Did you get through today's slides?"
+    )
+
+    history_response = client.get("/chat/history", headers={"Authorization": f"Bearer {token}"})
+    history = history_response.json()["messages"]
+    assert history[-1]["content"] == body["notification_message"]["content"]
+
+    async def _load_state():
+        async with client.factory() as session:  # type: ignore[attr-defined]
+            notification = await session.scalar(
+                select(Notification)
+                .where(Notification.user_id == user.id)
+                .order_by(Notification.id.desc())
+                .limit(1)
+            )
+            demo_state = await session.scalar(
+                select(DemoConversationState).where(DemoConversationState.user_id == user.id)
+            )
+            return notification, demo_state
+
+    notification, demo_state = asyncio.run(_load_state())
+    assert notification is not None
+    assert notification.status == "complete"
+    assert demo_state is not None
+    assert demo_state.status == "awaiting_slides_progress"
+    assert demo_state.course_name == "Algorithms"
+
+
+def test_demo_flow_scores_quiz_and_recommends_library(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = _insert_user(client, "demo_flow_user")
+    token = _login(client, "demo_flow_user")
+
+    quiz_items = [
+        QuizItem(
+            question="What does self-attention compute?",
+            answer="It computes context-aware token representations.",
+            topic="transformers",
+            source_ref="Machine Learning",
+        ),
+        QuizItem(
+            question="Why do transformers use positional information?",
+            answer="Because attention alone does not encode token order.",
+            topic="transformers",
+            source_ref="Machine Learning",
+        ),
+    ]
+    monkeypatch.setattr(chat_service, "_build_cognee_context", AsyncMock(return_value="materials"))
+    monkeypatch.setattr(chat_service.cognee_service, "generate_quiz", AsyncMock(return_value=quiz_items))
+    monkeypatch.setattr(
+        chat_service.litellm,
+        "acompletion",
+        AsyncMock(
+            side_effect=[
+                _tool_response(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tool-quiz",
+                            function=SimpleNamespace(
+                                name="generate_demo_quiz",
+                                arguments='{"coverage_percent":50,"question_count":2}',
+                            ),
+                        )
+                    ]
+                ),
+                _tool_response(
+                    content=(
+                        "okay, here's your quiz covering the first 50% of today's slides.\n\n"
+                        "1. What does self-attention compute?\n\n"
+                        "2. Why do transformers use positional information?"
+                    )
+                ),
+                _tool_response(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tool-score",
+                            function=SimpleNamespace(
+                                name="record_demo_quiz_result",
+                                arguments='{"correct_answers":2,"false_answers":0}',
+                            ),
+                        )
+                    ]
+                ),
+                _tool_response(
+                    content=(
+                        "You got 2/2 right, which is 100%. That's better than your average of 72%.\n\n"
+                        "How energized and focused are you feeling today?"
+                    )
+                ),
+                _tool_response(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tool-complete",
+                            function=SimpleNamespace(
+                                name="complete_demo_flow",
+                                arguments='{"outcome":"library_study_session"}',
+                            ),
+                        )
+                    ]
+                ),
+                _tool_response(content="Great, you should do a study session in the library."),
+            ]
+        ),
+    )
+
+    trigger = client.post(
+        "/chat/demo-trigger",
+        json={"course_name": "Machine Learning"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert trigger.status_code == 200
+
+    quiz_response = client.post(
+        "/chat/messages",
+        json={"content": "We only got through 50% of the slides today."},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert quiz_response.status_code == 200
+    quiz_text = quiz_response.json()["assistant_message"]["content"]
+    assert "okay, here's your quiz covering the first 50% of today's slides." in quiz_text
+    assert "What does self-attention compute?" in quiz_text
+
+    feedback_response = client.post(
+        "/chat/messages",
+        json={"content": "1. It computes context-aware token representations. 2. It adds token order."},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert feedback_response.status_code == 200
+    feedback_text = feedback_response.json()["assistant_message"]["content"]
+    assert "You got 2/2 right, which is 100%." in feedback_text
+    assert "better than your average of 72%" in feedback_text
+    assert "How energized and focused are you feeling today?" in feedback_text
+
+    recommendation_response = client.post(
+        "/chat/messages",
+        json={"content": "I'm feeling good and ready for action."},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert recommendation_response.status_code == 200
+    assert (
+        recommendation_response.json()["assistant_message"]["content"]
+        == "Great, you should do a study session in the library."
+    )
+
+    async def _load_demo_data():
+        async with client.factory() as session:  # type: ignore[attr-defined]
+            demo_state = await session.scalar(
+                select(DemoConversationState).where(DemoConversationState.user_id == user.id)
+            )
+            quiz = await session.scalar(select(Quiz).where(Quiz.user_id == user.id).limit(1))
+            result = await session.scalar(
+                select(QuizResult).where(QuizResult.user_id == user.id).limit(1)
+            )
+            return demo_state, quiz, result
+
+    demo_state, quiz, result = asyncio.run(_load_demo_data())
+    assert demo_state is not None
+    assert demo_state.status == "complete"
+    assert quiz is not None
+    assert result is not None
+    assert result.correct_answers == 2
+    assert result.false_answers == 0
+
+
+def test_demo_flow_low_energy_branch_recommends_rest(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _insert_user(client, "demo_rest_user")
+    token = _login(client, "demo_rest_user")
+
+    quiz_items = [
+        QuizItem(
+            question="What is backpropagation used for?",
+            answer="It computes gradients for learning.",
+            topic="backprop",
+            source_ref="Machine Learning",
+        )
+    ]
+    monkeypatch.setattr(chat_service, "_build_cognee_context", AsyncMock(return_value="materials"))
+    monkeypatch.setattr(chat_service.cognee_service, "generate_quiz", AsyncMock(return_value=quiz_items))
+    monkeypatch.setattr(
+        chat_service.litellm,
+        "acompletion",
+        AsyncMock(
+            side_effect=[
+                _tool_response(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tool-quiz",
+                            function=SimpleNamespace(
+                                name="generate_demo_quiz",
+                                arguments='{"coverage_percent":50,"question_count":1}',
+                            ),
+                        )
+                    ]
+                ),
+                _tool_response(
+                    content="okay, here's your quiz covering the first 50% of today's slides.\n\n1. What is backpropagation used for?"
+                ),
+                _tool_response(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tool-score",
+                            function=SimpleNamespace(
+                                name="record_demo_quiz_result",
+                                arguments='{"correct_answers":1,"false_answers":0}',
+                            ),
+                        )
+                    ]
+                ),
+                _tool_response(
+                    content=(
+                        "You got 1/1 right, which is 100%. That's better than your average of 72%.\n\n"
+                        "How energized and focused are you feeling today?"
+                    )
+                ),
+                _tool_response(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tool-complete",
+                            function=SimpleNamespace(
+                                name="complete_demo_flow",
+                                arguments='{"outcome":"rest_and_recover"}',
+                            ),
+                        )
+                    ]
+                ),
+                _tool_response(content="You should take the afternoon off and relax to recover."),
+            ]
+        ),
+    )
+
+    trigger = client.post(
+        "/chat/demo-trigger",
+        json={"course_name": "Machine Learning"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert trigger.status_code == 200
+
+    first_turn = client.post(
+        "/chat/messages",
+        json={"content": "We got through 50% today."},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert first_turn.status_code == 200
+
+    second_turn = client.post(
+        "/chat/messages",
+        json={"content": "It computes gradients for learning."},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert second_turn.status_code == 200
+
+    third_turn = client.post(
+        "/chat/messages",
+        json={"content": "I'm feeling low energy and tired."},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert third_turn.status_code == 200
+    assert (
+        third_turn.json()["assistant_message"]["content"]
+        == "You should take the afternoon off and relax to recover."
+    )

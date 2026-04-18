@@ -6,3 +6,4 @@ backend/.cognee_system/
 backend/seed/.state.json
 .claude/
 agent_memory.db
+.DS_STORE

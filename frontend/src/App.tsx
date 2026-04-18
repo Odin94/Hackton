@@ -23,6 +23,10 @@ type ChatReplyResponse = {
   assistant_message: ChatMessage
 }
 
+type DemoTriggerResponse = {
+  notification_message?: ChatMessage | null
+}
+
 type ChatSocketPayload = {
   type: 'chat_message' | 'ack'
   message?: ChatMessage
@@ -31,6 +35,7 @@ type ChatSocketPayload = {
 
 const TOKEN_KEY = 'hackton-chat-token'
 const USERNAME_KEY = 'hackton-chat-username'
+const DEMO_COURSE_NAME = 'Machine Learning'
 
 function App() {
   const [username, setUsername] = useState(() => localStorage.getItem(USERNAME_KEY) ?? '')
@@ -44,6 +49,7 @@ function App() {
   const [isSigningUp, setIsSigningUp] = useState(false)
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [isSending, setIsSending] = useState(false)
+  const [isTriggeringDemo, setIsTriggeringDemo] = useState(false)
   const listRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -264,6 +270,49 @@ function App() {
     }
   }
 
+  async function handleDemoTrigger() {
+    if (!token) {
+      setError('Log in before starting the demo flow.')
+      return
+    }
+
+    setIsTriggeringDemo(true)
+    setError('')
+    setStatus('Starting demo flow...')
+
+    try {
+      const response = await fetch('/chat/demo-trigger', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ course_name: DEMO_COURSE_NAME }),
+      })
+
+      if (!response.ok) {
+        throw new Error(await readError(response, 'Could not start the demo flow.'))
+      }
+
+      const body = (await response.json()) as DemoTriggerResponse
+      const notificationMessage = body.notification_message
+      if (notificationMessage) {
+        setMessages((current) => {
+          if (current.some((message) => message.id === notificationMessage.id)) {
+            return current
+          }
+          return [...current, notificationMessage]
+        })
+      }
+      setStatus(`Demo flow started for ${DEMO_COURSE_NAME}.`)
+    } catch (err) {
+      setError(toMessage(err))
+      setStatus('The demo flow did not start.')
+    } finally {
+      setIsTriggeringDemo(false)
+    }
+  }
+
   function handleLogout() {
     setToken('')
     setMessages([])
@@ -336,14 +385,24 @@ function App() {
             <p className="eyebrow">Chat history</p>
             <h2>SQLite-backed conversation</h2>
           </div>
-          <button
-            type="button"
-            className="ghost-button"
-            onClick={handleLogout}
-            disabled={!token}
-          >
-            Clear session
-          </button>
+          <div className="chat-header-actions">
+            <button
+              type="button"
+              className="subtle-button"
+              onClick={handleDemoTrigger}
+              disabled={!token || isTriggeringDemo}
+            >
+              {isTriggeringDemo ? 'Starting demo...' : 'Run demo flow'}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={handleLogout}
+              disabled={!token}
+            >
+              Clear session
+            </button>
+          </div>
         </header>
 
         <div className="message-list" ref={listRef}>

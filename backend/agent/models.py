@@ -92,6 +92,10 @@ class User(_Timestamps, Base):
     notifications: Mapped[list["Notification"]] = relationship(back_populates="user")
     quiz_results: Mapped[list["QuizResult"]] = relationship(back_populates="user")
     chat_messages: Mapped[list["ChatMessage"]] = relationship(back_populates="user")
+    demo_conversation_state: Mapped["DemoConversationState | None"] = relationship(
+        back_populates="user",
+        uselist=False,
+    )
 
 
 class Course(_Timestamps, Base):
@@ -235,6 +239,30 @@ class QuizResult(_Timestamps, Base):
     # Relationships
     user: Mapped["User"] = relationship(back_populates="quiz_results")
     quiz: Mapped["Quiz"] = relationship(back_populates="results")
+
+
+class DemoConversationState(_Timestamps, Base):
+    """Small persisted state machine used for the scripted demo chat flow."""
+
+    __tablename__ = "demo_conversation_states"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_demo_conversation_states_user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    course_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    coverage_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quiz_id: Mapped[int | None] = mapped_column(
+        ForeignKey("quizzes.id", ondelete="SET NULL"), nullable=True
+    )
+    average_score_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=70)
+
+    user: Mapped["User"] = relationship(back_populates="demo_conversation_state")
+    quiz: Mapped["Quiz | None"] = relationship()
 
 
 class ChatMessage(Base):
