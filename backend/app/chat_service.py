@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent.database import AsyncSessionLocal
 from agent.models import (
     ChatMessage,
+    Course,
+    Deadline,
     Notification,
     Quiz,
     QuizResult,
@@ -29,7 +31,9 @@ from app.config import settings
 log = logging.getLogger(__name__)
 
 _PROMPT_HISTORY_MESSAGES = 12
-_SCHEDULE_NOTIFICATION_MARKER = "Please enter your class and study schedule in chat"
+_COURSE_NOTIFICATION_MARKER = "What courses do you have?"
+_SCHEDULE_NOTIFICATION_MARKER = "Please share the schedule for all of your courses"
+_DEADLINE_NOTIFICATION_MARKER = "Please share any deadlines or exam dates"
 _VALID_EVENT_TYPES = ("lecture", "tutorium", "study session")
 
 
@@ -40,6 +44,26 @@ class ToolEvent:
     detail: str
 
 _CHAT_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "add_courses",
+            "description": (
+                "Add one or more course names for the user when they clearly list courses "
+                "they are taking."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "courses": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    }
+                },
+                "required": ["courses"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -61,18 +85,53 @@ _CHAT_TOOLS: list[dict[str, Any]] = [
                                     "type": "string",
                                     "enum": list(_VALID_EVENT_TYPES),
                                 },
+                                "course_id": {"type": "integer"},
                                 "name": {"type": "string"},
                                 "start_datetime": {"type": "string"},
                                 "end_datetime": {"type": "string"},
                             },
-                            "required": ["type", "name", "start_datetime", "end_datetime"],
+                            "required": [
+                                "type",
+                                "course_id",
+                                "name",
+                                "start_datetime",
+                                "end_datetime",
+                            ],
                         },
                     }
                 },
                 "required": ["events"],
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_deadlines",
+            "description": (
+                "Add course-linked deadlines or exam dates when the user clearly provides "
+                "a course, a name, and a specific datetime."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "deadlines": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "course_id": {"type": "integer"},
+                                "name": {"type": "string"},
+                                "datetime": {"type": "string"},
+                            },
+                            "required": ["course_id", "name", "datetime"],
+                        },
+                    }
+                },
+                "required": ["deadlines"],
+            },
+        },
+    },
 ]
 
 
@@ -340,13 +399,25 @@ async def _generate_chat_response(
         "If the answer is not supported by that context, say you could not find "
         "it in the stored knowledge. Be concise, helpful, and direct. "
         "Treat 'system' chat messages as prior assistant replies.\n\n"
-        "If the user provides their class or study schedule in chat and you can "
-        "confidently normalize it into explicit events, call add_schedule_events to "
-        "append them to SQLite before replying. Do not remove existing schedule events "
-        "unless the user explicitly asks to replace or delete them. Use only the allowed event types: "
-        "'lecture', 'tutorium', or 'study session'. If the schedule details are "
-        "ambiguous or missing required times, do not call the tool; ask a short "
-        "clarifying question instead."
+        "If diary retrieval shows personal study or wellbeing patterns, you may "
+        "use them for personalized advice, but keep the advice grounded in the "
+        "retrieved diary text.\n\n"
+        "You can use three tools during onboarding and later updates:\n"
+        "- add_courses: save courses the user is taking.\n"
+        "- add_schedule_events: save course-linked schedule events.\n"
+        "- add_deadlines: save course-linked deadlines or exam dates.\n\n"
+        "Onboarding order matters:\n"
+        "1. If the user has no saved courses yet, ask 'What courses do you have?' and use "
+        "add_courses when they clearly name them. Confirm the courses you added by name.\n"
+        "2. After courses exist, ask for the schedule for all courses and use add_schedule_events "
+        "only when each event can be normalized into explicit ISO-8601 start/end datetimes and "
+        "linked to a saved course_id. If the user only gives schedules for some saved courses, "
+        "save those and ask one more time for the missing course names.\n"
+        "3. After every course has at least one schedule event, ask for deadlines or exam dates and "
+        "use add_deadlines only when each item has a saved course_id plus a specific ISO-8601 datetime. "
+        "If some courses are still missing deadlines, ask specifically for those.\n\n"
+        "Do not invent courses, course_ids, datetimes, or deadlines. If required details are "
+        "ambiguous or missing, ask a short clarifying question instead."
     )
     user_prompt = (
         f"Current UTC time: {datetime.now(UTC).isoformat()}\n"
@@ -544,56 +615,262 @@ async def _dispatch_tool_call(
         tool_name,
         sorted(args.keys()),
     )
-    if tool_name != "add_schedule_events":
+    if tool_name == "add_courses":
+        try:
+            courses = await _add_courses(session, user_id, args.get("courses", []))
+            names = ", ".join(f"{course.name} (id={course.id})" for course in courses)
+            detail = f"added {len(courses)} course(s): {names}"
+            return f"Added {len(courses)} course(s): {names}.", ToolEvent(
+                tool_name=tool_name,
+                status="success",
+                detail=detail,
+            )
+        except ValueError as e:
+            log.warning(
+                "chat._dispatch_tool_call validation_error user_id=%d tool=%s error=%s args=%r",
+                user_id,
+                tool_name,
+                e,
+                args,
+            )
+            detail = str(e)
+            return (
+                "Failed to add courses because the provided course names were invalid. "
+                f"Error: {e}. Ask the user to resend the course names clearly."
+            ), ToolEvent(tool_name=tool_name, status="error", detail=detail)
+
+    if tool_name == "add_schedule_events":
+        try:
+            events, missing_courses = await _add_schedule_events(session, user_id, args.get("events", []))
+            names = ", ".join(event.name for event in events)
+            detail = f"added {len(events)} event(s): {names}"
+            if missing_courses:
+                detail += f"; still missing schedules for: {', '.join(missing_courses)}"
+            return f"Added {len(events)} event(s) to the user's schedule.", ToolEvent(
+                tool_name=tool_name,
+                status="success",
+                detail=detail,
+            )
+        except ValueError as e:
+            log.warning(
+                "chat._dispatch_tool_call validation_error user_id=%d tool=%s error=%s args=%r",
+                user_id,
+                tool_name,
+                e,
+                args,
+            )
+            detail = str(e)
+            return (
+                "Failed to add schedule events because the provided event details were invalid: "
+                f"{e}. Ask the user for a clearer schedule with explicit days and times."
+            ), ToolEvent(tool_name=tool_name, status="error", detail=detail)
+
+    if tool_name == "add_deadlines":
+        try:
+            deadlines, missing_courses = await _add_deadlines(session, user_id, args.get("deadlines", []))
+            names = ", ".join(deadline.name for deadline in deadlines)
+            detail = f"added {len(deadlines)} deadline(s): {names}"
+            if missing_courses:
+                detail += f"; still missing deadlines for: {', '.join(missing_courses)}"
+            return f"Added {len(deadlines)} deadline(s) for the user.", ToolEvent(
+                tool_name=tool_name,
+                status="success",
+                detail=detail,
+            )
+        except ValueError as e:
+            log.warning(
+                "chat._dispatch_tool_call validation_error user_id=%d tool=%s error=%s args=%r",
+                user_id,
+                tool_name,
+                e,
+                args,
+            )
+            detail = str(e)
+            return (
+                "Failed to add deadlines because the provided deadline details were invalid: "
+                f"{e}. Ask the user for explicit course names and exact dates or times."
+            ), ToolEvent(tool_name=tool_name, status="error", detail=detail)
+
+    else:
         log.warning("chat._dispatch_tool_call unknown_tool user_id=%d tool=%s", user_id, tool_name)
         detail = f"Unknown tool '{tool_name}'."
         return detail, ToolEvent(tool_name=tool_name, status="error", detail=detail)
+    
+    
+async def _upsert_followup_notification(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    marker: str,
+    content: str,
+) -> None:
+    existing = await session.scalar(
+        select(Notification.id)
+        .where(Notification.user_id == user_id)
+        .where(Notification.status == "pending")
+        .where(Notification.quiz_id.is_(None))
+        .where(Notification.content.contains(marker))
+        .limit(1)
+    )
+    if existing is not None:
+        return
+    session.add(
+        Notification(
+            user_id=user_id,
+            status="pending",
+            target_datetime=datetime.now(UTC),
+            content=content,
+            quiz_id=None,
+        )
+    )
 
-    try:
-        count = await _add_schedule_events(session, user_id, args.get("events", []))
-        detail = f"added {count} event(s) to the user's schedule"
-        return f"Added {count} event(s) to the user's schedule.", ToolEvent(
-            tool_name=tool_name,
-            status="success",
-            detail=detail,
+
+async def _complete_onboarding_notifications(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    marker: str,
+) -> None:
+    await session.execute(
+        update(Notification)
+        .where(
+            Notification.user_id == user_id,
+            Notification.status == "pending",
+            Notification.quiz_id.is_(None),
+            Notification.content.contains(marker),
         )
-    except ValueError as e:
-        log.warning(
-            "chat._dispatch_tool_call validation_error user_id=%d tool=%s error=%s args=%r",
-            user_id,
-            tool_name,
-            e,
-            args,
+        .values(status="complete")
+    )
+
+
+async def _courses_by_id(session: AsyncSession, user_id: int) -> dict[int, Course]:
+    rows = (
+        (
+            await session.execute(
+                select(Course).where(Course.user_id == user_id).order_by(Course.id.asc())
+            )
         )
-        detail = str(e)
-        return (
-            "Failed to add schedule events because the provided event details were invalid: "
-            f"{e}. Ask the user for a clearer schedule with explicit days and times."
-        ), ToolEvent(tool_name=tool_name, status="error", detail=detail)
-    except Exception as e:
-        log.exception(
-            "chat._dispatch_tool_call unexpected_error user_id=%d tool=%s args=%r",
-            user_id,
-            tool_name,
-            args,
+        .scalars()
+        .all()
+    )
+    return {course.id: course for course in rows}
+
+
+async def _missing_schedule_course_names(session: AsyncSession, user_id: int) -> list[str]:
+    courses = (
+        (
+            await session.execute(
+                select(Course).where(Course.user_id == user_id).order_by(Course.id.asc())
+            )
         )
-        detail = f"{type(e).__name__}: {e}"
-        return (
-            "Failed to add schedule events due to an internal error. "
-            f"Error: {type(e).__name__}: {e}. Ask the user to retry or clarify."
-        ), ToolEvent(tool_name=tool_name, status="error", detail=detail)
+        .scalars()
+        .all()
+    )
+    scheduled_course_ids = {
+        course_id
+        for course_id in (
+            await session.execute(
+                select(ScheduleEvent.course_id)
+                .where(ScheduleEvent.user_id == user_id, ScheduleEvent.course_id.is_not(None))
+            )
+        )
+        .scalars()
+        .all()
+        if course_id is not None
+    }
+    return [course.name for course in courses if course.id not in scheduled_course_ids]
+
+
+async def _missing_deadline_course_names(session: AsyncSession, user_id: int) -> list[str]:
+    courses = (
+        (
+            await session.execute(
+                select(Course).where(Course.user_id == user_id).order_by(Course.id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    deadline_course_ids = {
+        course_id
+        for course_id in (
+            await session.execute(
+                select(Deadline.course_id).where(Deadline.user_id == user_id)
+            )
+        )
+        .scalars()
+        .all()
+    }
+    return [course.name for course in courses if course.id not in deadline_course_ids]
+
+
+async def _add_courses(
+    session: AsyncSession,
+    user_id: int,
+    courses: list[str],
+) -> list[Course]:
+    if not courses:
+        raise ValueError("no courses provided")
+
+    existing_courses = (
+        (
+            await session.execute(
+                select(Course).where(Course.user_id == user_id).order_by(Course.id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_name = {course.name.casefold(): course for course in existing_courses}
+    stored: list[Course] = []
+
+    for raw_name in courses:
+        name = str(raw_name).strip()
+        if not name:
+            raise ValueError("course names cannot be empty")
+        existing = by_name.get(name.casefold())
+        if existing is not None:
+            stored.append(existing)
+            continue
+        course = Course(user_id=user_id, name=name)
+        session.add(course)
+        await session.flush()
+        by_name[name.casefold()] = course
+        stored.append(course)
+
+    await _complete_onboarding_notifications(
+        session, user_id=user_id, marker=_COURSE_NOTIFICATION_MARKER
+    )
+    await _upsert_followup_notification(
+        session,
+        user_id=user_id,
+        marker=_SCHEDULE_NOTIFICATION_MARKER,
+        content=(
+            "Thanks. Please share the schedule for all of your courses in chat so I can "
+            "save course-linked events."
+        ),
+    )
+    await session.flush()
+    return stored
 
 
 async def _add_schedule_events(
     session: AsyncSession,
     user_id: int,
     events: list[dict[str, Any]],
-) -> int:
+) -> tuple[list[ScheduleEvent], list[str]]:
     log.debug(
         "chat._add_schedule_events start user_id=%d raw_event_count=%d",
         user_id,
         len(events),
     )
+    if not events:
+        raise ValueError("no schedule events provided")
+
+    courses_by_id = await _courses_by_id(session, user_id)
+    if not courses_by_id:
+        raise ValueError("no saved courses exist yet for this user")
+
     normalized_events: list[ScheduleEvent] = []
     for raw_event in events:
         event_type = str(raw_event["type"]).strip().lower()
@@ -619,9 +896,13 @@ async def _add_schedule_events(
             raise ValueError("schedule event end_datetime must be after start_datetime")
 
         name = str(raw_event["name"]).strip()
+        course_id = int(raw_event["course_id"])
+        if course_id not in courses_by_id:
+            raise ValueError(f"unknown course_id: {course_id}")
         log.debug(
-            "chat._add_schedule_events normalized_event user_id=%d type=%s name=%r start=%s end=%s",
+            "chat._add_schedule_events normalized_event user_id=%d course_id=%d type=%s name=%r start=%s end=%s",
             user_id,
+            course_id,
             event_type,
             name,
             start.isoformat(),
@@ -630,6 +911,7 @@ async def _add_schedule_events(
         normalized_events.append(
             ScheduleEvent(
                 user_id=user_id,
+                course_id=course_id,
                 type=event_type,
                 name=name,
                 start_datetime=start,
@@ -640,24 +922,80 @@ async def _add_schedule_events(
     for event in normalized_events:
         session.add(event)
 
-    await session.execute(
-        update(Notification)
-        .where(
-            Notification.user_id == user_id,
-            Notification.status == "pending",
-            Notification.quiz_id.is_(None),
-            Notification.content.contains(_SCHEDULE_NOTIFICATION_MARKER),
-        )
-        .values(status="complete")
-    )
     await session.flush()
+    missing_courses = await _missing_schedule_course_names(session, user_id)
+    if not missing_courses:
+        await _complete_onboarding_notifications(
+            session, user_id=user_id, marker=_SCHEDULE_NOTIFICATION_MARKER
+        )
+        await _upsert_followup_notification(
+            session,
+            user_id=user_id,
+            marker=_DEADLINE_NOTIFICATION_MARKER,
+            content=(
+                "Great. Please share any deadlines or exam dates for your courses so I can "
+                "track them and remind you in time."
+            ),
+        )
     log.info(
         "chat._add_schedule_events committed user_id=%d added_count=%d event_names=%s",
         user_id,
         len(normalized_events),
         [event.name for event in normalized_events],
     )
-    return len(normalized_events)
+    return normalized_events, missing_courses
+
+
+async def _add_deadlines(
+    session: AsyncSession,
+    user_id: int,
+    deadlines: list[dict[str, Any]],
+) -> tuple[list[Deadline], list[str]]:
+    log.debug(
+        "chat._add_deadlines start user_id=%d raw_deadline_count=%d",
+        user_id,
+        len(deadlines),
+    )
+    if not deadlines:
+        raise ValueError("no deadlines provided")
+
+    courses_by_id = await _courses_by_id(session, user_id)
+    if not courses_by_id:
+        raise ValueError("no saved courses exist yet for this user")
+
+    stored: list[Deadline] = []
+    for raw_deadline in deadlines:
+        course_id = int(raw_deadline["course_id"])
+        if course_id not in courses_by_id:
+            raise ValueError(f"unknown course_id: {course_id}")
+
+        deadline_dt = _parse_iso_datetime(str(raw_deadline["datetime"]))
+        name = str(raw_deadline["name"]).strip()
+        if not name:
+            raise ValueError("deadline name cannot be empty")
+
+        deadline = Deadline(
+            user_id=user_id,
+            course_id=course_id,
+            datetime=deadline_dt,
+            name=name,
+        )
+        session.add(deadline)
+        stored.append(deadline)
+
+    await session.flush()
+    missing_courses = await _missing_deadline_course_names(session, user_id)
+    if not missing_courses:
+        await _complete_onboarding_notifications(
+            session, user_id=user_id, marker=_DEADLINE_NOTIFICATION_MARKER
+        )
+    log.info(
+        "chat._add_deadlines committed user_id=%d added_count=%d deadline_names=%s",
+        user_id,
+        len(stored),
+        [deadline.name for deadline in stored],
+    )
+    return stored, missing_courses
 
 
 def _parse_iso_datetime(value: str) -> datetime:
@@ -677,12 +1015,35 @@ async def _build_sqlite_context(session: AsyncSession, user_id: int) -> str:
         log.warning("chat._build_sqlite_context missing_user user_id=%d", user_id)
         raise ValueError(f"unknown user_id={user_id}")
 
+    courses = (
+        (
+            await session.execute(
+                select(Course).where(Course.user_id == user_id).order_by(Course.id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    course_by_id = {course.id: course.name for course in courses}
+
     upcoming_events = (
         (
             await session.execute(
                 select(ScheduleEvent)
                 .where(ScheduleEvent.user_id == user_id)
                 .order_by(ScheduleEvent.start_datetime.asc())
+                .limit(10)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    deadlines = (
+        (
+            await session.execute(
+                select(Deadline)
+                .where(Deadline.user_id == user_id)
+                .order_by(Deadline.datetime.asc())
                 .limit(10)
             )
         )
@@ -728,20 +1089,62 @@ async def _build_sqlite_context(session: AsyncSession, user_id: int) -> str:
 
     lines = [
         f"User: username={user.username!r}, name={user.name!r}, email={user.email!r}",
-        "Upcoming schedule events:",
+        "Courses:",
     ]
+    if courses:
+        lines.extend(
+            f"- course_id={course.id}: {course.name}"
+            for course in courses
+        )
+    else:
+        lines.append("- none")
+
+    lines.append("Upcoming schedule events:")
     if upcoming_events:
         lines.extend(
-            f"- {event.type}: {event.name} from {event.start_datetime.isoformat()} to {event.end_datetime.isoformat()}"
+            (
+                f"- {event.type}: {event.name} from {event.start_datetime.isoformat()} "
+                f"to {event.end_datetime.isoformat()} "
+                f"(course_id={event.course_id}, course={course_by_id.get(event.course_id)})"
+            )
             for event in upcoming_events
         )
+    else:
+        lines.append("- none")
+
+    lines.append("Courses without schedule events:")
+    missing_schedule = await _missing_schedule_course_names(session, user_id)
+    if missing_schedule:
+        lines.extend(f"- {name}" for name in missing_schedule)
+    else:
+        lines.append("- none")
+
+    lines.append("Upcoming deadlines:")
+    if deadlines:
+        lines.extend(
+            (
+                f"- {deadline.datetime.isoformat()}: {deadline.name} "
+                f"(course_id={deadline.course_id}, course={course_by_id.get(deadline.course_id)})"
+            )
+            for deadline in deadlines
+        )
+    else:
+        lines.append("- none")
+
+    lines.append("Courses without deadlines:")
+    missing_deadlines = await _missing_deadline_course_names(session, user_id)
+    if missing_deadlines:
+        lines.extend(f"- {name}" for name in missing_deadlines)
     else:
         lines.append("- none")
 
     lines.append("Recent quizzes:")
     if recent_quizzes:
         lines.extend(
-            f"- {quiz.title} on {quiz.topic} ({quiz.estimated_duration_minutes} min)"
+            (
+                f"- {quiz.title} on {quiz.topic} ({quiz.estimated_duration_minutes} min, "
+                f"course_id={quiz.course_id}, course={course_by_id.get(quiz.course_id)})"
+            )
             for quiz in recent_quizzes
         )
     else:

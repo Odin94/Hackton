@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent.database import Base
 from agent.models import ChatMessage, Notification
-from app import chat_service, routes_auth, routes_ws
+from app import chat_service, routes_auth
 from app.routes_auth import router as auth_router
 from app.routes_ws import router as ws_router
 
@@ -69,7 +69,7 @@ def test_ws_connect_delivers_due_notification_as_chat_message(client: TestClient
     assert {
         payload["message"]["content"] for payload in payloads
     } == {
-        "Welcome! Please enter your class and study schedule in chat so I can save it and personalize reminders and quizzes.",
+        "Welcome! What courses do you have? I can save them first, then ask for your schedule and deadlines.",
         "Please add your Friday tutorial to your schedule.",
     }
 
@@ -105,6 +105,6 @@ def test_ws_connect_delivers_due_notification_as_chat_message(client: TestClient
     assert {
         message.content for message in chat_messages
     } == {
-        "Welcome! Please enter your class and study schedule in chat so I can save it and personalize reminders and quizzes.",
+        "Welcome! What courses do you have? I can save them first, then ask for your schedule and deadlines.",
         "Please add your Friday tutorial to your schedule.",
     }

@@ -16,8 +16,8 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.cognee_service import NoDataError, generate_quiz as cognee_generate_quiz
-from app.cognee_service import query_materials
+from app.cognee_service import NoDataError, query_materials
+from app.cognee_service import generate_quiz as cognee_generate_quiz
 from app.connection_manager import manager as ws_manager
 
 from .database import AsyncSessionLocal
@@ -87,6 +87,7 @@ async def _generate_quizzes_impl(user_id: int, session: AsyncSession) -> list[in
         log.debug("Persisting quiz event='%s' items=%d estimated_duration_minutes=%d", event.name, len(quiz_items), duration_mins)
         quiz = Quiz(
             user_id=user_id,
+            course_id=event.course_id,
             title=f"Quiz: {event.name}",
             topic=event.name,
             estimated_duration_minutes=duration_mins,

@@ -2,19 +2,20 @@
 Agent harness
 =============
 Provides ``_quiz_llm_call``, the single entry-point for all LLM interactions in
-the agent layer.  The model is handed a ``write_to_db`` tool; if it fires the
-tool the harness executes the DB write and feeds the result back so the model
-can decide whether to call the tool again or finish.
+the agent layer. The model is handed persistence and notification tools; if it
+fires a tool the harness executes it and feeds the result back so the model can
+decide whether to call another tool or finish.
 
 Returns the full conversation as ``list[dict]`` (one dict per message).
 """
 
 import json
 import logging
+from datetime import UTC, datetime
 
 import litellm
 
-from .db import write_entry
+from .db import create_notification, write_entry
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,34 @@ MODEL = "gpt-4o-mini"
 # ---------------------------------------------------------------------------
 
 TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_notification",
+            "description": (
+                "Queue a proactive chat notification for a specific user at a specific "
+                "time when a reminder, quiz nudge, or study-habit intervention would help."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "integer",
+                        "description": "The app user who should receive the notification.",
+                    },
+                    "target_datetime": {
+                        "type": "string",
+                        "description": "ISO-8601 timestamp for when the notification should be delivered.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The exact message to deliver in chat.",
+                    },
+                },
+                "required": ["user_id", "target_datetime", "content"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -61,6 +90,20 @@ TOOLS: list[dict] = [
 # ---------------------------------------------------------------------------
 
 async def _dispatch_tool(name: str, args: dict) -> str:
+    if name == "schedule_notification":
+        user_id = int(args["user_id"])
+        target_datetime = datetime.fromisoformat(str(args["target_datetime"]).replace("Z", "+00:00"))
+        if target_datetime.tzinfo is None:
+            target_datetime = target_datetime.replace(tzinfo=UTC)
+        notification_id = await create_notification(
+            user_id,
+            str(args["content"]),
+            target_datetime,
+        )
+        return (
+            f"Scheduled notification #{notification_id} for user {user_id} at "
+            f"{target_datetime.isoformat()}."
+        )
     if name == "write_to_db":
         row_id = await write_entry(args["entry_type"], args["content"])
         return f"Stored entry #{row_id} (type='{args['entry_type']}')."

@@ -1,8 +1,8 @@
 """Background scheduler — two concurrent asyncio loops.
 
 LLM check-in loop (every 1 h)
-    Asks the model whether there is anything worth persisting to the agent log.
-    The model can call the ``write_to_db`` tool freely.
+    Reviews diary + app state for each user and decides whether to persist an
+    insight and/or queue proactive notifications.
 
 Notification dispatch loop (every 60 s)
     Queries the DB for pending Notifications whose target_datetime has passed
@@ -14,9 +14,16 @@ so the caller can cancel them cleanly on shutdown.
 
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 
-from .db import read_recent
+from sqlalchemy import select
+
+from app.cognee_service import CogneeServiceError, NoDataError, query_diary
+
+from .database import AsyncSessionLocal
+from .db import list_user_ids, read_recent
 from .harness import _quiz_llm_call
+from .models import Course, Deadline, Notification, Quiz, QuizResult, ScheduleEvent, User
 from .quiz_workflow import dispatch_due_notifications
 
 log = logging.getLogger(__name__)
@@ -33,16 +40,31 @@ NOTIFICATION_DISPATCH_INTERVAL = 60  # 1 minute
 # ---------------------------------------------------------------------------
 
 _LLM_SYSTEM_PROMPT = """\
-You are StudyBot's autonomous memory agent.  You run in the background and
-decide what is worth remembering for future study sessions.
+You are StudyBot's autonomous study coach. You run in the background and help a
+student make better study decisions, stay ahead of deadlines, and reinforce
+healthy habits discovered from their diary.
 
-You have access to a write_to_db tool.  Use it to store quiz insights, study
-patterns, recurring weak topics, or any other observation that would be useful
-to surface later.  Be selective — only write what is genuinely valuable.
+You have access to two tools:
+- write_to_db: persist durable insights, patterns, or concerns for later use.
+- schedule_notification: queue a proactive chat notification for the user.
+
+Rules:
+- Use ONLY the supplied diary retrieval, SQLite app state, and recent agent-log entries.
+- Prefer concrete, timely interventions over generic encouragement.
+- Good notifications are short and actionable: reminder before an event, recovery
+  nudge after slipping, habit advice grounded in diary evidence, or a prompt to
+  do a quiz/review at the right time.
+- Avoid duplicates if a similar pending notification already exists.
+- Be selective: zero notifications is fine when there is nothing useful to do.
 """
 
-
-def _build_llm_user_prompt(recent: list[dict]) -> str:
+def _build_llm_user_prompt(
+    *,
+    user_id: int,
+    sqlite_context: str,
+    diary_context: str,
+    recent: list[dict],
+) -> str:
     if recent:
         rows = "\n".join(
             f"  [{r['created_at']}] ({r['entry_type']}) {r['content'][:120]}"
@@ -53,12 +75,176 @@ def _build_llm_user_prompt(recent: list[dict]) -> str:
         context = "The agent log is currently empty — nothing has been recorded yet."
 
     return (
-        "It's your scheduled hourly check-in.\n\n"
-        f"{context}\n\n"
-        "Based on what you know about recent quiz activity and student learning "
-        "patterns, decide whether there is anything new and meaningful worth "
-        "recording.  If yes, call write_to_db.  If not, say so briefly."
+        f"It's your scheduled hourly check-in for user {user_id}.\n\n"
+        f"Current UTC time: {datetime.now(UTC).isoformat()}\n\n"
+        f"SQLite application context:\n{sqlite_context}\n\n"
+        f"Diary retrieval:\n{diary_context}\n\n"
+        f"Recent agent-log entries:\n{context}\n\n"
+        "Decide whether there is anything worth doing right now:\n"
+        "- store a durable study insight,\n"
+        "- queue a proactive notification, or\n"
+        "- do nothing.\n"
+        "When scheduling a notification, make it specific and supportive."
     )
+
+
+async def _build_scheduler_sqlite_context(user_id: int) -> str:
+    async with AsyncSessionLocal() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            raise ValueError(f"unknown user_id={user_id}")
+
+        now = datetime.now(UTC)
+        upcoming_cutoff = now + timedelta(days=7)
+        recent_cutoff = now - timedelta(days=14)
+
+        courses = (
+            (
+                await session.execute(
+                    select(Course).where(Course.user_id == user_id).order_by(Course.id.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        upcoming_events = (
+            (
+                await session.execute(
+                    select(ScheduleEvent)
+                    .where(ScheduleEvent.user_id == user_id)
+                    .where(ScheduleEvent.start_datetime >= now)
+                    .where(ScheduleEvent.start_datetime <= upcoming_cutoff)
+                    .order_by(ScheduleEvent.start_datetime.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        upcoming_deadlines = (
+            (
+                await session.execute(
+                    select(Deadline)
+                    .where(Deadline.user_id == user_id)
+                    .where(Deadline.datetime >= now)
+                    .where(Deadline.datetime <= upcoming_cutoff)
+                    .order_by(Deadline.datetime.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        pending_notifications = (
+            (
+                await session.execute(
+                    select(Notification)
+                    .where(Notification.user_id == user_id)
+                    .where(Notification.status == "pending")
+                    .order_by(Notification.target_datetime.asc())
+                    .limit(8)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        recent_results = (
+            (
+                await session.execute(
+                    select(QuizResult)
+                    .where(QuizResult.user_id == user_id)
+                    .where(QuizResult.quiz_taken_datetime >= recent_cutoff)
+                    .order_by(QuizResult.quiz_taken_datetime.desc())
+                    .limit(5)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        recent_quizzes = (
+            (
+                await session.execute(
+                    select(Quiz)
+                    .where(Quiz.user_id == user_id)
+                    .order_by(Quiz.created_at.desc())
+                    .limit(5)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    lines = [
+        f"User: username={user.username!r}, name={user.name!r}, email={user.email!r}",
+        "Courses:",
+    ]
+    if courses:
+        lines.extend(f"- course_id={course.id}: {course.name}" for course in courses)
+    else:
+        lines.append("- none")
+
+    lines.append("Upcoming deadlines in the next 7 days:")
+    if upcoming_deadlines:
+        lines.extend(
+            f"- {deadline.datetime.isoformat()}: {deadline.name} (course_id={deadline.course_id})"
+            for deadline in upcoming_deadlines
+        )
+    else:
+        lines.append("- none")
+
+    lines.extend([
+        "Upcoming schedule events in the next 7 days:",
+    ])
+    if upcoming_events:
+        lines.extend(
+            f"- {event.type}: {event.name} from {event.start_datetime.isoformat()} to {event.end_datetime.isoformat()}"
+            for event in upcoming_events
+        )
+    else:
+        lines.append("- none")
+
+    lines.append("Pending notifications:")
+    if pending_notifications:
+        lines.extend(
+            f"- {notification.target_datetime.isoformat()}: {notification.content}"
+            for notification in pending_notifications
+        )
+    else:
+        lines.append("- none")
+
+    lines.append("Recent quizzes:")
+    if recent_quizzes:
+        lines.extend(
+            f"- {quiz.title} on {quiz.topic} ({quiz.estimated_duration_minutes} min)"
+            for quiz in recent_quizzes
+        )
+    else:
+        lines.append("- none")
+
+    lines.append("Recent quiz results from the last 14 days:")
+    if recent_results:
+        lines.extend(
+            f"- quiz_id={result.quiz_id}: correct={result.correct_answers}, false={result.false_answers}, taken={result.quiz_taken_datetime.isoformat()}"
+            for result in recent_results
+        )
+    else:
+        lines.append("- none")
+
+    return "\n".join(lines)
+
+
+async def _build_scheduler_diary_context() -> str:
+    proactive_query = (
+        "Summarize the student's study habits, energy patterns, setbacks, healthy routines, "
+        "and the most helpful next nudges or reminders a study coach should send soon."
+    )
+    try:
+        answer = await query_diary(proactive_query)
+    except NoDataError:
+        return "No diary context found."
+    except CogneeServiceError as exc:
+        log.warning("Scheduler: diary retrieval unavailable: %s", exc)
+        return f"Diary retrieval unavailable: {exc}"
+    cleaned = answer.strip()
+    return cleaned or "No diary context found."
 
 
 async def _llm_checkin_loop() -> None:
@@ -68,14 +254,45 @@ async def _llm_checkin_loop() -> None:
         log.info("Scheduler: LLM check-in starting")
         try:
             recent = await read_recent(limit=10)
-            log.debug("Scheduler: LLM check-in fetched %d recent log entries", len(recent))
-            messages = await _quiz_llm_call(_LLM_SYSTEM_PROMPT, _build_llm_user_prompt(recent))
-            log.debug("Scheduler: LLM check-in conversation turns=%d", len(messages))
-            final = next(
-                (m.get("content") for m in reversed(messages) if m.get("role") == "assistant"),
-                "(no reply)",
+            user_ids = await list_user_ids()
+            if not user_ids:
+                log.info("Scheduler: no users found for proactive check-in")
+                continue
+
+            diary_context = await _build_scheduler_diary_context()
+            log.debug(
+                "Scheduler: LLM check-in fetched %d recent log entries for %d user(s)",
+                len(recent),
+                len(user_ids),
             )
-            log.info("Scheduler: LLM check-in done — %s", (final or "")[:200])
+            for user_id in user_ids:
+                try:
+                    sqlite_context = await _build_scheduler_sqlite_context(user_id)
+                    messages = await _quiz_llm_call(
+                        _LLM_SYSTEM_PROMPT,
+                        _build_llm_user_prompt(
+                            user_id=user_id,
+                            sqlite_context=sqlite_context,
+                            diary_context=diary_context,
+                            recent=recent,
+                        ),
+                    )
+                    log.debug(
+                        "Scheduler: LLM check-in conversation turns=%d user_id=%d",
+                        len(messages),
+                        user_id,
+                    )
+                    final = next(
+                        (m.get("content") for m in reversed(messages) if m.get("role") == "assistant"),
+                        "(no reply)",
+                    )
+                    log.info(
+                        "Scheduler: proactive check-in done user_id=%d — %s",
+                        user_id,
+                        (final or "")[:200],
+                    )
+                except Exception:
+                    log.exception("Scheduler: proactive check-in failed for user_id=%d", user_id)
         except Exception:
             log.exception("Scheduler: LLM check-in failed")
 

@@ -75,8 +75,8 @@ async def signup(req: UsernameReq) -> AuthResp:
             status="pending",
             target_datetime=datetime.now(UTC),
             content=(
-                "Welcome! Please enter your class and study schedule in chat so I can "
-                "save it and personalize reminders and quizzes."
+                "Welcome! What courses do you have? I can save them first, then ask for "
+                "your schedule and deadlines."
             ),
             quiz_id=None,
         )

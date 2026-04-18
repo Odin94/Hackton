@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent.database import Base
-from agent.models import ChatMessage, Notification, ScheduleEvent, User
+from agent.models import ChatMessage, Course, Deadline, Notification, ScheduleEvent, User
 from app import chat_service, routes_auth, routes_chat
 from app.routes_auth import router as auth_router
 from app.routes_chat import router as chat_router
@@ -159,7 +159,7 @@ def test_post_chat_message_persists_turn(client: TestClient, monkeypatch: pytest
     assert "[tokens: prompt=11, completion=7, total=18]" in history[1]["content"]
 
 
-def test_signup_creates_schedule_prompt_notification(client: TestClient) -> None:
+def test_signup_creates_course_prompt_notification(client: TestClient) -> None:
     response = client.post("/signup", json={"username": "newbie"})
 
     assert response.status_code == 200
@@ -175,7 +175,7 @@ def test_signup_creates_schedule_prompt_notification(client: TestClient) -> None
     notifications = asyncio.run(_load())
     assert len(notifications) == 1
     assert notifications[0].status == "pending"
-    assert "enter your class and study schedule" in notifications[0].content.lower()
+    assert "what courses do you have" in notifications[0].content.lower()
 
 
 def test_post_chat_message_adds_schedule_events(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,11 +184,16 @@ def test_post_chat_message_adds_schedule_events(client: TestClient, monkeypatch:
     token = response.json()["token"]
     user_id = response.json()["user_id"]
 
-    async def _seed_existing_event() -> None:
+    async def _seed_existing_event() -> tuple[int, int]:
         async with client.factory() as session:  # type: ignore[attr-defined]
+            math = Course(user_id=user_id, name="Math")
+            databases = Course(user_id=user_id, name="Databases")
+            session.add_all([math, databases])
+            await session.flush()
             session.add(
                 ScheduleEvent(
                     user_id=user_id,
+                    course_id=math.id,
                     type="lecture",
                     name="Existing math lecture",
                     start_datetime=chat_service._parse_iso_datetime("2026-04-19T08:00:00+02:00"),
@@ -196,8 +201,9 @@ def test_post_chat_message_adds_schedule_events(client: TestClient, monkeypatch:
                 )
             )
             await session.commit()
+            return math.id, databases.id
 
-    asyncio.run(_seed_existing_event())
+    math_id, databases_id = asyncio.run(_seed_existing_event())
 
     monkeypatch.setattr(chat_service, "_build_cognee_context", AsyncMock(return_value="materials"))
     monkeypatch.setattr(
@@ -213,10 +219,10 @@ def test_post_chat_message_adds_schedule_events(client: TestClient, monkeypatch:
                                 name="add_schedule_events",
                                 arguments=(
                                     '{"events":['
-                                    '{"type":"lecture","name":"Databases",'
+                                    f'{{"type":"lecture","course_id":{databases_id},"name":"Databases",'
                                     '"start_datetime":"2026-04-20T09:00:00+02:00",'
                                     '"end_datetime":"2026-04-20T10:30:00+02:00"},'
-                                    '{"type":"study session","name":"Algorithms review",'
+                                    f'{{"type":"study session","course_id":{math_id},"name":"Algorithms review",'
                                     '"start_datetime":"2026-04-21T14:00:00+02:00",'
                                     '"end_datetime":"2026-04-21T16:00:00+02:00"}'
                                     ']}'
@@ -238,7 +244,7 @@ def test_post_chat_message_adds_schedule_events(client: TestClient, monkeypatch:
 
     assert post_response.status_code == 200
     assistant_content = post_response.json()["assistant_message"]["content"]
-    assert "add schedule events: added 2 event(s) to the user's schedule" in assistant_content
+    assert "add schedule events: added 2 event(s): Databases, Algorithms review" in assistant_content
     assert "I saved those schedule events to your calendar." in assistant_content
 
     async def _load_state():
@@ -274,13 +280,13 @@ def test_post_chat_message_adds_schedule_events(client: TestClient, monkeypatch:
         "Algorithms review",
     ]
     assert [event.type for event in events] == ["lecture", "lecture", "study session"]
-    assert notifications[0].status == "complete"
+    assert notifications[0].status == "pending"
 
 
-def test_post_chat_message_recovers_from_invalid_schedule_tool_call(
+def test_post_chat_message_adds_courses_and_deadline(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    response = client.post("/signup", json={"username": "recover_user"})
+    response = client.post("/signup", json={"username": "onboard_user"})
     assert response.status_code == 200
     token = response.json()["token"]
     user_id = response.json()["user_id"]
@@ -296,10 +302,120 @@ def test_post_chat_message_recovers_from_invalid_schedule_tool_call(
                         SimpleNamespace(
                             id="tool-1",
                             function=SimpleNamespace(
+                                name="add_courses",
+                                arguments='{"courses":["Algorithms","Databases"]}',
+                            ),
+                        )
+                    ]
+                ),
+                _tool_response(
+                    content="I added Algorithms and Databases. Now send me the schedule for both courses."
+                ),
+                _tool_response(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tool-2",
+                            function=SimpleNamespace(
+                                name="add_deadlines",
+                                arguments='{"deadlines":[{"course_id":1,"name":"Algorithms exam","datetime":"2026-05-10T09:00:00+02:00"}]}',
+                            ),
+                        )
+                    ]
+                ),
+                _tool_response(
+                    content="I added the Algorithms exam deadline. I still need deadlines for Databases."
+                ),
+            ]
+        ),
+    )
+
+    courses_response = client.post(
+        "/chat/messages",
+        json={"content": "I have Algorithms and Databases this semester."},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert courses_response.status_code == 200
+    assert "add courses: added 2 course(s): Algorithms (id=1), Databases (id=2)" in courses_response.json()["assistant_message"]["content"]
+
+    deadlines_response = client.post(
+        "/chat/messages",
+        json={"content": "Algorithms exam is on 2026-05-10 at 09:00."},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert deadlines_response.status_code == 200
+    assert "add deadlines: added 1 deadline(s): Algorithms exam; still missing deadlines for: Databases" in deadlines_response.json()["assistant_message"]["content"]
+
+    async def _load_state():
+        async with client.factory() as session:  # type: ignore[attr-defined]
+            courses = (
+                (
+                    await session.execute(
+                        select(Course).where(Course.user_id == user_id).order_by(Course.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            deadlines = (
+                (
+                    await session.execute(
+                        select(Deadline).where(Deadline.user_id == user_id).order_by(Deadline.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            notifications = (
+                (
+                    await session.execute(
+                        select(Notification).where(Notification.user_id == user_id).order_by(Notification.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return courses, deadlines, notifications
+
+    courses, deadlines, notifications = asyncio.run(_load_state())
+    assert [course.name for course in courses] == ["Algorithms", "Databases"]
+    assert deadlines[0].name == "Algorithms exam"
+    assert deadlines[0].course_id == courses[0].id
+    assert notifications[0].status == "complete"
+
+
+def test_post_chat_message_recovers_from_invalid_schedule_tool_call(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = client.post("/signup", json={"username": "recover_user"})
+    assert response.status_code == 200
+    token = response.json()["token"]
+    user_id = response.json()["user_id"]
+
+    async def _seed_course() -> int:
+        async with client.factory() as session:  # type: ignore[attr-defined]
+            course = Course(user_id=user_id, name="Distributed systems")
+            session.add(course)
+            await session.commit()
+            await session.refresh(course)
+            return course.id
+
+    course_id = asyncio.run(_seed_course())
+
+    monkeypatch.setattr(chat_service, "_build_cognee_context", AsyncMock(return_value="materials"))
+    monkeypatch.setattr(
+        chat_service.litellm,
+        "acompletion",
+        AsyncMock(
+            side_effect=[
+                _tool_response(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="tool-1",
+                            function=SimpleNamespace(
                                 name="add_schedule_events",
                                 arguments=(
                                     '{"events":['
-                                    '{"type":"lecture","name":"Distributed systems",'
+                                    f'{{"type":"lecture","course_id":{course_id},"name":"Distributed systems",'
                                     '"start_datetime":"monday at nine",'
                                     '"end_datetime":"monday at ten"}'
                                     ']}'

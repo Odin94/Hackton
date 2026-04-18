@@ -14,12 +14,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent.database import Base
-from agent.db import read_recent, write_entry
-from agent.models import AgentLog, ChatMessage, Notification, Quiz, QuizResult, ScheduleEvent, User
+from agent.db import create_notification, list_user_ids, read_recent, write_entry
+from agent.models import (
+    ChatMessage,
+    Course,
+    Deadline,
+    Notification,
+    Quiz,
+    QuizResult,
+    ScheduleEvent,
+    User,
+)
 from agent.quiz_workflow import (
     _dispatch_due_notifications_impl,
     _generate_quizzes_impl,
 )
+from agent.scheduler import _build_llm_user_prompt, _build_scheduler_sqlite_context
 from app.types import QuizItem
 
 # ---------------------------------------------------------------------------
@@ -69,8 +79,8 @@ async def _make_user(session: AsyncSession, **kw) -> User:
     _user_counter += 1
     user = User(
         username=kw.get("username", f"user_{_user_counter}"),
-        name=kw.get("name", None),
-        email=kw.get("email", None),
+        name=kw.get("name"),
+        email=kw.get("email"),
     )
     session.add(user)
     await session.flush()
@@ -239,6 +249,115 @@ async def test_read_recent_returns_newest_first(engine):
 
     assert rows[0]["content"] == "second"
     assert rows[1]["content"] == "first"
+
+
+async def test_list_user_ids_returns_sorted(engine):
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as session:
+        await _make_user(session, username="charlie")
+        await _make_user(session, username="alice")
+        await session.commit()
+
+    with patch("agent.db.AsyncSessionLocal", factory):
+        assert await list_user_ids() == [1, 2]
+
+
+async def test_create_notification_dedupes_identical_pending(engine):
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    target = _future(90)
+
+    async with factory() as session:
+        user = await _make_user(session)
+        await session.commit()
+
+    with patch("agent.db.AsyncSessionLocal", factory):
+        first_id = await create_notification(user.id, "Hydrate before class.", target)
+        second_id = await create_notification(user.id, "Hydrate before class.", target)
+
+    assert first_id == second_id
+
+    async with factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(Notification).where(Notification.user_id == user.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+
+
+async def test_build_scheduler_sqlite_context_includes_user_state(engine):
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as session:
+        user = await _make_user(session, username="planner", name="Planner")
+        course = Course(user_id=user.id, name="Algorithms")
+        session.add(course)
+        await session.flush()
+        event = ScheduleEvent(
+            user_id=user.id,
+            course_id=course.id,
+            type="lecture",
+            name="Algorithms",
+            start_datetime=_future(120),
+            end_datetime=_future(150),
+        )
+        notification = Notification(
+            user_id=user.id,
+            status="pending",
+            target_datetime=_future(30),
+            content="Review your notes before Algorithms.",
+        )
+        quiz = Quiz(
+            user_id=user.id,
+            course_id=course.id,
+            title="Quiz: Algorithms",
+            topic="Algorithms",
+            estimated_duration_minutes=8,
+            questions=[{"question": "Q?", "answer": "A"}],
+        )
+        deadline = Deadline(
+            user_id=user.id,
+            course_id=course.id,
+            datetime=_future(240),
+            name="Algorithms exam",
+        )
+        result = QuizResult(
+            user_id=user.id,
+            quiz=quiz,
+            correct_answers=3,
+            false_answers=1,
+            quiz_taken_datetime=_past(120),
+        )
+        session.add_all([event, notification, quiz, deadline, result])
+        await session.commit()
+
+    with patch("agent.scheduler.AsyncSessionLocal", factory):
+        context = await _build_scheduler_sqlite_context(user.id)
+
+    assert "Algorithms" in context
+    assert "Algorithms exam" in context
+    assert "course_id=" in context
+    assert "Review your notes before Algorithms." in context
+    assert "quiz_id=" in context
+
+
+def test_build_llm_user_prompt_includes_diary_and_sqlite_context():
+    prompt = _build_llm_user_prompt(
+        user_id=7,
+        sqlite_context="Upcoming schedule events:\n- lecture: ML",
+        diary_context="The student focuses better after a morning run.",
+        recent=[{"created_at": "2026-04-18T10:00:00+00:00", "entry_type": "study_pattern", "content": "Exercise seems to help focus."}],
+    )
+
+    assert "user 7" in prompt
+    assert "morning run" in prompt
+    assert "Upcoming schedule events" in prompt
+    assert "study_pattern" in prompt
 
 
 # ---------------------------------------------------------------------------

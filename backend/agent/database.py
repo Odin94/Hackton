@@ -3,7 +3,12 @@
 import logging
 from pathlib import Path
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase
 
 log = logging.getLogger(__name__)
@@ -23,8 +28,36 @@ class Base(DeclarativeBase):
     pass
 
 
+async def _sqlite_column_names(conn: AsyncConnection, table: str) -> set[str]:
+    rows = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
+    return {str(row[1]) for row in rows.fetchall()}
+
+
+async def _sqlite_add_column_if_missing(
+    conn: AsyncConnection, table: str, column: str, ddl: str
+) -> None:
+    columns = await _sqlite_column_names(conn, table)
+    if column in columns:
+        return
+    await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+    log.info("DB migration added column %s.%s", table, column)
+
+
 async def create_all_tables() -> None:
     """Create all tables that are not yet present. Safe to call on every startup."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if engine.dialect.name == "sqlite":
+            await _sqlite_add_column_if_missing(
+                conn,
+                "schedule_events",
+                "course_id",
+                "course_id INTEGER REFERENCES courses(id)",
+            )
+            await _sqlite_add_column_if_missing(
+                conn,
+                "quizzes",
+                "course_id",
+                "course_id INTEGER REFERENCES courses(id)",
+            )
     log.info("DB tables verified at %s", DB_PATH)

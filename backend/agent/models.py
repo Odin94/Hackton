@@ -3,6 +3,8 @@
 Entities
 --------
 User            — platform user
+Course          — user-owned course catalog entry
+Deadline        — dated milestone/exam tied to a course
 ScheduleEvent   — lecture / tutorium / study session
 Quiz            — generated quiz linked to one user and optionally many events
 Notification    — delivery record; dispatched via WebSocket when due
@@ -14,12 +16,12 @@ AgentLog        — internal log written by the background LLM agent
 from datetime import UTC, datetime
 
 from sqlalchemy import (
-    Column,
+    JSON,
     CheckConstraint,
+    Column,
     DateTime,
     ForeignKey,
     Integer,
-    JSON,
     String,
     Table,
     UniqueConstraint,
@@ -27,7 +29,6 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -84,11 +85,52 @@ class User(_Timestamps, Base):
     phone_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Relationships
+    courses: Mapped[list["Course"]] = relationship(back_populates="user")
+    deadlines: Mapped[list["Deadline"]] = relationship(back_populates="user")
     schedule_events: Mapped[list["ScheduleEvent"]] = relationship(back_populates="user")
     quizzes: Mapped[list["Quiz"]] = relationship(back_populates="user")
     notifications: Mapped[list["Notification"]] = relationship(back_populates="user")
     quiz_results: Mapped[list["QuizResult"]] = relationship(back_populates="user")
     chat_messages: Mapped[list["ChatMessage"]] = relationship(back_populates="user")
+
+
+class Course(_Timestamps, Base):
+    """A user-owned course the app can link schedules, deadlines, and quizzes to."""
+
+    __tablename__ = "courses"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_courses_user_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="courses")
+    deadlines: Mapped[list["Deadline"]] = relationship(back_populates="course")
+    schedule_events: Mapped[list["ScheduleEvent"]] = relationship(back_populates="course")
+    quizzes: Mapped[list["Quiz"]] = relationship(back_populates="course")
+
+
+class Deadline(_Timestamps, Base):
+    """A course-linked deadline, exam date, or other dated milestone."""
+
+    __tablename__ = "deadlines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    course_id: Mapped[int] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="deadlines")
+    course: Mapped["Course"] = relationship(back_populates="deadlines")
 
 
 class ScheduleEvent(_Timestamps, Base):
@@ -100,6 +142,9 @@ class ScheduleEvent(_Timestamps, Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    course_id: Mapped[int | None] = mapped_column(
+        ForeignKey("courses.id", ondelete="SET NULL"), index=True, nullable=True
+    )
     # "lecture" | "tutorium" | "study session"
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     name: Mapped[str] = mapped_column(String(256), nullable=False)
@@ -108,6 +153,7 @@ class ScheduleEvent(_Timestamps, Base):
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="schedule_events")
+    course: Mapped["Course | None"] = relationship(back_populates="schedule_events")
     quizzes: Mapped[list["Quiz"]] = relationship(
         secondary=quiz_schedule_events, back_populates="schedule_events"
     )
@@ -127,6 +173,9 @@ class Quiz(_Timestamps, Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    course_id: Mapped[int | None] = mapped_column(
+        ForeignKey("courses.id", ondelete="SET NULL"), index=True, nullable=True
+    )
     title: Mapped[str] = mapped_column(String(256), nullable=False)
     topic: Mapped[str] = mapped_column(String(256), nullable=False)
     estimated_duration_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -135,6 +184,7 @@ class Quiz(_Timestamps, Base):
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="quizzes")
+    course: Mapped["Course | None"] = relationship(back_populates="quizzes")
     schedule_events: Mapped[list["ScheduleEvent"]] = relationship(
         secondary=quiz_schedule_events, back_populates="quizzes"
     )

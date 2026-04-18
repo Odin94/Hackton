@@ -5,15 +5,18 @@ Public API
 init_db()           — create all tables (called from FastAPI lifespan)
 write_entry()       — append a row to agent_log; returns new row-id
 read_recent()       — return the N most-recent agent_log rows as plain dicts
+list_user_ids()     — return all known user ids
+create_notification() — queue a notification, deduping exact pending matches
 """
 
 import logging
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import AsyncSessionLocal, create_all_tables
-from .models import AgentLog
+from .models import AgentLog, Notification, User
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +54,63 @@ async def read_recent(limit: int = 20) -> list[dict]:
             }
             for r in rows
         ]
+
+
+async def list_user_ids() -> list[int]:
+    """Return all known user ids in ascending order."""
+    async with AsyncSessionLocal() as session:
+        rows = await session.execute(select(User.id).order_by(User.id.asc()))
+        return list(rows.scalars().all())
+
+
+async def create_notification(
+    user_id: int,
+    content: str,
+    target_datetime: datetime,
+    *,
+    quiz_id: int | None = None,
+) -> int:
+    """Queue a notification unless an identical pending one already exists."""
+    cleaned = content.strip()
+    if not cleaned:
+        raise ValueError("notification content cannot be empty")
+
+    async with AsyncSessionLocal() as session:
+        existing = await session.scalar(
+            select(Notification.id)
+            .where(Notification.user_id == user_id)
+            .where(Notification.status == "pending")
+            .where(Notification.target_datetime == target_datetime)
+            .where(Notification.content == cleaned)
+            .where(Notification.quiz_id.is_(quiz_id) if quiz_id is None else Notification.quiz_id == quiz_id)
+            .limit(1)
+        )
+        if existing is not None:
+            log.debug(
+                "Reusing existing pending notification id=%d user_id=%d target=%s",
+                existing,
+                user_id,
+                target_datetime.isoformat(),
+            )
+            return int(existing)
+
+        notification = Notification(
+            user_id=user_id,
+            status="pending",
+            target_datetime=target_datetime,
+            content=cleaned,
+            quiz_id=quiz_id,
+        )
+        session.add(notification)
+        await session.commit()
+        await session.refresh(notification)
+        log.debug(
+            "Notification id=%d queued for user_id=%d target=%s",
+            notification.id,
+            user_id,
+            target_datetime.isoformat(),
+        )
+        return notification.id
 
 
 # ---------------------------------------------------------------------------
