@@ -255,6 +255,30 @@ async def cognify_dataset(dataset: Dataset) -> None:
             _state[dataset] = "idle"
 
 
+# Prompt-level dataset isolation. `ENABLE_BACKEND_ACCESS_CONTROL=false` means
+# cognee's `datasets=[...]` filter is silently ignored — a single unfiltered
+# query runs across the whole graph (verified in `search_in_datasets_context`
+# → non-AC `else` branch). These system prompts instruct the LLM to ignore
+# cross-dataset context at synthesis time.
+_DATASET_SYSTEM_PROMPTS: dict[str, str] = {
+    "diary": (
+        "You answer questions about the user's personal study diary. Use ONLY "
+        "context that reads like journal entries — dated personal notes about "
+        "their study sessions, feelings, or habits. If the context contains "
+        "lecture material, textbook prose, or slide content, IGNORE it. "
+        "If no diary context is relevant, say so — do NOT substitute course "
+        "material. Speak to the user about their own patterns."
+    ),
+    "materials": (
+        "You answer questions about the user's lecture materials and readings. "
+        "Use ONLY context that reads like lecture content, textbook prose, or "
+        "slide excerpts. If the context contains personal diary entries or "
+        "daily reflections, IGNORE them. Your answers should be factual, "
+        "technical, and grounded in the material."
+    ),
+}
+
+
 async def _query(dataset: Dataset, q: str) -> str:
     if not q.strip():
         raise ValueError("empty query")
@@ -264,6 +288,7 @@ async def _query(dataset: Dataset, q: str) -> str:
                 query_type=SearchType.GRAPH_COMPLETION,
                 query_text=q,
                 datasets=[dataset],
+                system_prompt=_DATASET_SYSTEM_PROMPTS[dataset],
             )
         except Exception as e:
             raise _wrap(e) from e
@@ -346,13 +371,17 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
         source_ref = _extract_source_ref(chunks[0])
 
         system_prompt = (
-            "You generate study quiz items strictly grounded in the provided context.\n"
+            "You generate study quiz items strictly grounded in lecture materials.\n"
             "Rules:\n"
-            "1. Every question must be answerable from the context alone — no outside knowledge.\n"
-            "2. Mix question types: definitional, mechanism, application, comparison.\n"
-            "3. Avoid trivial restatement ('What does the context say about X?'). Test understanding.\n"
-            "4. Answers must be 1–2 sentences, factual, self-contained.\n"
-            f"5. Return exactly {n} items.\n"
+            "1. Use ONLY context that reads like lecture content, textbook prose, "
+            "or slide text. If the context contains personal journal entries or "
+            "daily reflections, IGNORE them — those belong to a different dataset.\n"
+            "2. Every question must be answerable from the remaining lecture context "
+            "alone — no outside knowledge.\n"
+            "3. Mix question types: definitional, mechanism, application, comparison.\n"
+            "4. Avoid trivial restatement ('What does the context say about X?'). Test understanding.\n"
+            "5. Answers must be 1–2 sentences, factual, self-contained.\n"
+            f"6. Return exactly {n} items.\n"
             'Output JSON: {"items":[{"question":str,"answer":str}, ...]}.'
         )
         user_prompt = f"Topic: {topic}\n\nContext:\n{context_text}"

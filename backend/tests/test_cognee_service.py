@@ -375,6 +375,29 @@ async def test_query_rejects_empty(mock_cognee):
         await cognee_service.query_diary("   ")
 
 
+@pytest.mark.asyncio
+async def test_query_diary_passes_diary_system_prompt(mock_cognee):
+    """Dataset isolation with access control off: the system prompt tells the
+    LLM to ignore cross-dataset context. This test pins that wiring."""
+    mock_cognee.search.return_value = ["ok"]
+    await cognee_service.query_diary("what patterns?")
+    prompt = mock_cognee.search.await_args.kwargs["system_prompt"]
+    assert "diary" in prompt.lower()
+    assert "ignore" in prompt.lower()
+    # Explicit about excluding the other dataset.
+    assert "lecture" in prompt.lower() or "material" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_query_materials_passes_materials_system_prompt(mock_cognee):
+    mock_cognee.search.return_value = ["ok"]
+    await cognee_service.query_materials("explain transformers")
+    prompt = mock_cognee.search.await_args.kwargs["system_prompt"]
+    assert "material" in prompt.lower() or "lecture" in prompt.lower()
+    assert "ignore" in prompt.lower()
+    assert "diary" in prompt.lower() or "journal" in prompt.lower()
+
+
 # ----- index_status --------------------------------------------------------
 
 def test_index_status_returns_snapshot():
