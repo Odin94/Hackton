@@ -19,6 +19,18 @@ Conventions:
 
 ---
 
+## Iteration 15 — prompt-level dataset isolation (103 tests)
+
+Reversed the AC-on flip from iter 12 in favor of prompt-level isolation. "Reliable and simple" preference — AC-on is cognee's multi-tenant path with unknown edge cases in single-user mode, AC-off is the proven single-user path we've been running on.
+
+- **`.env` / `.env.example`:** `ENABLE_BACKEND_ACCESS_CONTROL=false`. Single shared graph.
+- **`_DATASET_SYSTEM_PROMPTS` constant** maps each dataset to an explicit "ignore cross-dataset context" instruction. `_query(dataset, q)` passes the matching prompt via `system_prompt=` kwarg on `cognee.search` (verified cognee's `search()` accepts this kwarg at `search.py:34` and that it takes precedence over `system_prompt_path` at the retriever level).
+- **Quiz system prompt strengthened** to explicitly tell `emit_quiz` to ignore any context that reads like a journal entry.
+- **Tests:** +2 (`test_query_{diary,materials}_passes_{diary,materials}_system_prompt`) pin the prompt wiring. 103 passing, 0 lint.
+- Updated delta 11 to reflect the reversal and reasoning.
+
+**Known limit:** CHUNKS retrieval (for quiz) doesn't run an LLM — chunks can be cross-contaminated at retrieval time. Semantic bias (diary entries are short personal notes vs lectures being long technical prose) mostly prevents this; prompt instruction is the backstop.
+
 ## Iteration 14 — quiz → tool-use mode (101 tests)
 
 Preempts the "LiteLLM strips `response_format` on OpenRouter" (#4 from my audit) before first live run. Bug fires per-model and per-version — rather than verify-and-pray, I moved to the function-calling path that cognee's internal calls already use.

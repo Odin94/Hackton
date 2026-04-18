@@ -48,13 +48,14 @@ Format per entry:
 - **Why:** Spec §10 item 4 requires `source_ref` to be populated with a filename from seeded materials. Verified: with raw-string ingest, the name is an md5 hash; with file-path ingest, `Document.name` is the actual filename (`cognee/tasks/ingestion/ingest_data.py:153`).
 - **Status:** implemented on `cognee/iter`. `material.source` is sanitized to a filesystem-safe name before being used as the filename. Tempdir is isolated per-call (so concurrent ingests of the same `source` can't collide) and removed after `cognee.add` returns (including on failure).
 
-## Delta 11 — Enable `ENABLE_BACKEND_ACCESS_CONTROL` for real dataset isolation
+## Delta 11 — Prompt-level dataset isolation (AC-off + explicit system prompts)
 
-- **Section:** §1 datasets / §6 config.
-- **Change:** `.env` and `.env.example` flip `ENABLE_BACKEND_ACCESS_CONTROL=false` → `true`. Spec §1 says "kept disjoint"; with the flag off, cognee's `search()` runs a single unfiltered query with `dataset=None` (`modules/search/methods/search.py:304-327`), so `datasets=["diary"]` is ignored and diary queries can pull materials-derived context (and vice versa).
-- **Why:** LanceDB + Kuzu are both in cognee's `VECTOR_DBS_WITH_MULTI_USER_SUPPORT` / `GRAPH_DBS_WITH_MULTI_USER_SUPPORT` lists, so the flag materializes per-dataset database files — real storage-level isolation. The same flag routes `add`/`cognify` to the dataset-specific DB via the pipeline's `set_database_global_context_variables` call, so data-in and data-out stay consistent.
-- **Risk:** not yet verified under a live cognify run. If single-user mode mis-behaves with the flag on, fallback is prompt-engineering isolation (tell the LLM "only consider diary entries" in query prompts).
-- **Status:** flag flipped on `cognee/iter`. Needs live-run confirmation.
+- **Section:** §1 datasets / §3 service / §6 config.
+- **Change:** `.env` / `.env.example` keep `ENABLE_BACKEND_ACCESS_CONTROL=false`. Storage is a single shared graph. Isolation enforced at synthesis time: `_query(dataset, q)` now passes a dataset-specific `system_prompt=` to `cognee.search` (via `_DATASET_SYSTEM_PROMPTS["diary"|"materials"]`) that instructs the LLM to ignore cross-dataset context. Quiz system prompt also strengthened to exclude diary-shaped chunks.
+- **Why (reconsidered):** The AC-on path (per-dataset databases) is cognee's multi-tenant code path — unknowns around default-user setup, path-layout migration, and cross-dataset asyncio.gather. Trading complexity for the reliability of cognee's well-exercised single-user path. Prompt-level isolation has a clean failure mode (the LLM either respects the instruction or doesn't — easy to observe in demo logs) vs AC-on's opaque DB-context switching.
+- **Known limits:** CHUNKS search (quiz retrieval) doesn't go through an LLM before returning to us; the chunk list itself can be cross-contaminated (diary chunks match on topical vocabulary). Quiz prompt compensates by telling the emit_quiz function to ignore journal-shaped context. In practice, diary entries are short personal notes and lecture materials are long technical prose — semantic search biases away from the contamination.
+- **Risk if prompt instruction is ignored:** LLM hallucinates from wrong dataset. Visible in demo, easy to flag, no silent corruption. Worst case recovery: flip AC on and debug the other path.
+- **Status:** implemented on main. Two new tests pin the prompt wiring (`test_query_diary_passes_diary_system_prompt`, `test_query_materials_passes_materials_system_prompt`).
 
 - **Section:** §3 service / §4 error mapping.
 - **Change:** `CogneeServiceError` now has concrete subclasses: `NoDataError`, `LLMTimeoutError`, `MalformedLLMResponseError`, `UpstreamRateLimitError`, `UpstreamError`. Each sets a sensible `default_retryable`. `_wrap()` returns the specific subclass when the underlying exception matches a known pattern, otherwise the base class (treated as non-retryable). All subclasses still pass `isinstance(exc, CogneeServiceError)`, so §4 HTTP mapping continues to work without changes.
