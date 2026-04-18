@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     llm_call_timeout_seconds: float = 30.0
     disable_scheduler: bool = False
     current_date_override: str | None = None
+    elevenlabs_api_key: str = "sk-placeholder-replace-with-real-elevenlabs-key"
+    elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
 
 
 settings = Settings()

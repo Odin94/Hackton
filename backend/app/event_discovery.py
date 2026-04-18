@@ -160,7 +160,7 @@ Return JSON only:
       "location": "city / online / null",
       "category": "career | fun | networking | other",
       "score": 0-100,
-      "score_reasoning": "one sentence why this student would or wouldn't like it"
+      "score_reasoning": "one sentence addressed directly to the user in second person (e.g. 'You might love this because…' or 'This may not be your thing since…')"
     }
   ]
 }"""

@@ -7,13 +7,14 @@ that lets you open a WebSocket.  Designed for local demo use only.
 import logging
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 
 from agent.database import AsyncSessionLocal
 from agent.models import Notification, User
-from app.auth import create_token
+from app.auth import create_token, get_user_id
+from app.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -119,3 +120,15 @@ async def login(req: UsernameReq) -> AuthResp:
     log.info("User logged in: username=%s id=%d", user.username, user.id)
     log.debug("POST /login → token minted for user_id=%d", user.id)
     return AuthResp(token=create_token(user.id), user_id=user.id, username=user.username)
+
+
+@router.get("/config", summary="Client configuration (auth required)")
+async def get_config(authorization: str | None = Header(default=None)) -> dict:
+    """Return client-side config values for authenticated users."""
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    if not token or get_user_id(token) is None:
+        raise HTTPException(status_code=401, detail="invalid or missing token")
+    return {
+        "elevenlabs_api_key": settings.elevenlabs_api_key,
+        "elevenlabs_voice_id": settings.elevenlabs_voice_id,
+    }
