@@ -9,6 +9,15 @@ Conventions:
 
 ---
 
+## Iteration 18 — remove orphaned `backend/quiz/` (133 tests)
+
+- **Deleted `backend/quiz/generator.py` + `__init__.py`.** Never wired: no route imported it, no code called it. Was a parallel quiz implementation from an earlier commit (hardcoded mock schedule, `instructor` + gpt-4o-mini, no cognee). Dead module cleanup, not a behavior change.
+- **`instructor` dep unchanged** — it stays as a transitive via cognee, not our direct dep.
+- **Demo direction captured:** user accepted diary-fabrication risk for demo visibility. Fix is B2 (flip `ENABLE_BACKEND_ACCESS_CONTROL=true`) post-demo. See `project_hackton_demo_fabrication.md` memory.
+- **Tests:** 133 passing, 0 lint. (Jump from 119 → 133 is agent-side tests accumulated on main since iter 17's snapshot — not new cognee-layer tests.)
+
+---
+
 ## Iteration 17 — large-PDF fix + full 3-course corpus ingest (119 tests)
 
 **Root cause fixed:** Cognee's `upsert_edges` issues one `INSERT … VALUES (…), (…), …` for all edges in a batch. SQLite caps SQL variables at 32 766; 11 columns/row → max ~2 978 rows per INSERT. Dense CS-textbook PDFs exceed this even at 10 chunks/batch.
@@ -27,8 +36,8 @@ Conventions:
 
 ## Status snapshot
 
-- **Repo state:** `main@d8da1f2` — narrative diary entries + seed.sh landed.
-- **Tests:** 119 passing (`cd backend && uv run pytest`, ~0.9s — 107 ours + 12 from Odin's agent tests). `uv run ruff check` clean.
+- **Repo state:** `main` at iter 18 (orphaned `backend/quiz/` removed). Frontend rebuild happening on a separate branch — scope-fence still holds.
+- **Tests:** 133 passing (`cd backend && uv run pytest`, ~1.4s — 107 cognee-layer + 26 agent-side from Odin). `uv run ruff check` clean.
 - **Live verified:** Full 3-course corpus (DS + EI + Analysis, 28 PDFs, 1356 pages) ingested + cognified in ~90s. Quiz on "graphs" returns 3 grounded DS questions with correct source_ref. Diary isolation degraded with full corpus (see open threads).
 - **Live smoke harness:** `backend/scripts/live_smoke.py` — `uv run python -m scripts.live_smoke [--pdf PATH] [--course NAME] [--topic TOPIC] [--n N] [--skip-ingest]`. Now prints page count + ETA before cognify and elapsed time after.
 - **Corpus on disk:** 42 PDFs. 28 ingested (DS + EI + Analysis). ERA (10 PDFs, 126 MB, up to 24 MB each) excluded — too slow to cognify for demo.
@@ -38,7 +47,7 @@ Conventions:
 ## Open threads (things that opened but didn't close)
 
 - **ERA corpus excluded.** `Einführung_in_die_Rechnerarchitektur` (10 PDFs, 126 MB, up to 24 MB) skipped via `--skip-courses`. Individual files would take hours to cognify. Option: postgres backend, pre-split, or just exclude permanently for demo.
-- **Odin's parallel `/quiz/generate`** at `backend/quiz/generator.py` (from commit `2266c42`). Uses `instructor` + gpt-4o-mini + hardcoded mock schedule; doesn't use cognee. Coexists with our `/quiz`. Amin's frontend will wire against one of them — needs coordination.
+- ~~**Odin's parallel `/quiz/generate`**~~ — removed in iter 18. `backend/quiz/` deleted; it was orphaned (no route ever wired it, no importer). Our `/quiz` (cognee-grounded) is the sole quiz path.
 - ~~**CORS missing in `main.py`.**~~ Fixed in iter 17.
 - **Diary isolation degraded with full corpus.** Empty-diary query returns fabricated content instead of `NoDataError` once 28 PDFs are cognified. Prompt-level isolation (iter 15) insufficient when shared graph is large. Options: `ENABLE_BACKEND_ACCESS_CONTROL=true`, stronger prompt, or accept (quiz flow unaffected).
 - **Quiz quality on off-topic prompts.** gpt-4o-mini doesn't refuse when the topic has no material; grounds loosely in whatever the retriever returns. Prompt already says "strictly grounded". Options: stronger refusal instruction, explicit "return empty if no relevant content" in the tool schema.
