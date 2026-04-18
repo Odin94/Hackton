@@ -9,6 +9,21 @@ Conventions:
 
 ---
 
+## Iteration 3 — test suite (65 tests, all passing)
+
+- `backend/tests/` scaffolded; `pyproject.toml` adds pytest + pytest-asyncio + httpx under `[dependency-groups].dev` and configures `asyncio_mode = "auto"`.
+- `test_cognee_service.py` (39 tests): sanitizer, retryability classifier, add_diary/add_material body formatting, cognify state machine, cognify lock serialization (same-dataset), cognify cross-dataset concurrency, query joining + single-hit unwrap (str/dict), index_status snapshot semantics, reset prune calls, full generate_quiz matrix — happy path, empty chunks, single-dict normalization, missing lineage, over-n truncation, under-n warning, one-shot retry on bad JSON, give-up after second retry, retry on malformed item shape, input validation.
+- `test_routes.py` (20 tests): /health; POST happy paths; Pydantic 422s for bounds + missing fields + invalid dataset; error mapping matrix for ValueError → 400, CogneeServiceError non-retryable → 500, retryable → 503, unknown → 500; index-status snapshot.
+- `test_seed.py` (6 tests): filename date + course parsers.
+- All 65 tests run in 0.4s via `uv run pytest`. No network, no filesystem writes.
+
+## Iteration 2 — lowest-risk hardening pass
+
+- **Routes:** Pydantic bounds on `QuizReq.n` (1–20), `QuizReq.topic` (≤200), `QueryReq.q` (1–2000). Cognify now adds its task to a module-level `set` with a done-callback, preventing early GC. Added `GET /health`.
+- **Service:** `_wrap` now also classifies `asyncio.TimeoutError` / `TimeoutError` / `ConnectionError` instances as retryable, beyond the substring heuristic. `generate_quiz` now performs an in-function one-shot retry on malformed JSON (and on malformed item shape), matching spec §9 intent — previously the spec said "caller retries once" but no caller did. Also: truncate to `n` on over-delivery, warn on under-delivery.
+- **Seed:** `_parse_diary_date` pulls `YYYY-MM-DD` prefix from diary filenames into `DiaryEntry.ts` (UTC midnight); `_parse_course` pulls `ml-l3` → `ML-L3` from material filenames. Manifest save wrapped in `try/finally` so partial progress survives errors.
+- Logged 3 spec-deltas in `notes/spec-deltas.md` — quiz retry location, `/health` addition, HTTP bounds.
+
 ## Iteration 1 — audit findings (no code changes)
 
 Enumerated quality targets across `backend/app/`, `backend/scripts/`, `backend/seed/`. Nothing edited yet — this pass is diagnostic.
