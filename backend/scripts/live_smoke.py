@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -65,15 +66,34 @@ async def _step(label: str, coro) -> object | None:
 
 
 async def run(pdf: Path, course: str, topic: str, n: int, skip_ingest: bool) -> None:
+    size_mb = pdf.stat().st_size / 1_048_576 if pdf.is_file() else 0
     print(f"PDF: {pdf}  exists={pdf.is_file()}  size={pdf.stat().st_size if pdf.is_file() else 'n/a'}", flush=True)
     if not pdf.is_file():
         print(f"FATAL: PDF not found at {pdf}", flush=True)
         sys.exit(2)
 
     if not skip_ingest:
+        try:
+            from pypdf import PdfReader
+            page_count = len(PdfReader(pdf).pages)
+            est_chunks = max(1, page_count * 2)
+            est_min = round(est_chunks / 20 * 0.5, 1)
+            est_max = round(est_chunks / 20 * 2, 1)
+            print(
+                f"[progress] {page_count} pages · ~{est_chunks} chunks estimated"
+                f" · cognify ETA {est_min}–{est_max} min",
+                flush=True,
+            )
+        except Exception:
+            print(f"[progress] {size_mb:.1f} MB · page count unavailable", flush=True)
+
+        t0 = time.monotonic()
         await _step(f"ingest {pdf.name} (bootstraps DB on fresh state)",
                     cognee_service.add_material_from_file(pdf, course))
+        cognify_start = time.monotonic()
         await _step("cognify materials (slow)", cognee_service.cognify_dataset("materials"))
+        elapsed = time.monotonic() - cognify_start
+        print(f"[progress] cognify done in {elapsed:.0f}s  (total since ingest: {time.monotonic()-t0:.0f}s)", flush=True)
 
     print(f"\n=== generate quiz: topic={topic!r} n={n} ===", flush=True)
     try:

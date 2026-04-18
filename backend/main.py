@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from app import config  # noqa: F401 — normalizes env before cognee loads
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.routes_cognee import router as cognee_router
 from app.routes_auth import router as auth_router
@@ -47,6 +48,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, title="Study Diary backend")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(auth_router)
 app.include_router(ws_router)
 app.include_router(chat_router)

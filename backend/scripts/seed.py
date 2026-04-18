@@ -69,7 +69,9 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _find_material_dirs(root: Path) -> list[tuple[Path, str]]:
+def _find_material_dirs(
+    root: Path, skip_courses: set[str] | None = None
+) -> list[tuple[Path, str]]:
     """Discover (materials_dir, course_label) pairs under `root`.
 
     Supports two layouts:
@@ -77,13 +79,18 @@ def _find_material_dirs(root: Path) -> list[tuple[Path, str]]:
     - Course-nested: `<root>/<course>/materials/`   → course = <course>
 
     Hidden dirs (.git, .venv) and the top-level `diary/` are skipped.
+    Courses listed in `skip_courses` are excluded.
     """
+    skip = skip_courses or set()
     pairs: list[tuple[Path, str]] = []
     flat = root / "materials"
-    if flat.is_dir():
+    if flat.is_dir() and "seed" not in skip:
         pairs.append((flat, "seed"))
     for sub in sorted(root.iterdir()):
         if not sub.is_dir() or sub.name.startswith(".") or sub.name in {"materials", "diary"}:
+            continue
+        if sub.name in skip:
+            log.info("[materials] skipping course %s (--skip-courses)", sub.name)
             continue
         nested = sub / "materials"
         if nested.is_dir():
@@ -96,8 +103,9 @@ async def _ingest_materials(
     manifest: dict[str, str],
     stats: dict[str, int],
     failed: list[tuple[str, str]],
+    skip_courses: set[str] | None = None,
 ) -> None:
-    for materials_dir, course in _find_material_dirs(root):
+    for materials_dir, course in _find_material_dirs(root, skip_courses):
         log.info("[materials] walking %s (course=%s)", materials_dir.relative_to(root), course)
         for path in sorted(materials_dir.rglob("*")):
             if not path.is_file() or path.suffix.lower() not in SUPPORTED_MATERIAL_SUFFIXES:
@@ -152,7 +160,7 @@ async def _ingest_diary(
             log.warning("[diary] FAILED %s: %s", rel, e)
 
 
-async def cmd_ingest(root: Path) -> None:
+async def cmd_ingest(root: Path, skip_courses: set[str] | None = None) -> None:
     if not root.is_dir():
         log.error("%s is not a directory", root)
         sys.exit(2)
@@ -162,7 +170,7 @@ async def cmd_ingest(root: Path) -> None:
     failed: list[tuple[str, str]] = []
 
     try:
-        await _ingest_materials(root, manifest, stats, failed)
+        await _ingest_materials(root, manifest, stats, failed, skip_courses)
         await _ingest_diary(root, manifest, stats, failed)
     finally:
         _save_manifest(manifest)
@@ -201,6 +209,13 @@ def main() -> None:
         help="add files from <dir> (flat or course-nested; see module docstring)",
     )
     ingest.add_argument("directory", type=Path)
+    ingest.add_argument(
+        "--skip-courses",
+        nargs="+",
+        metavar="COURSE",
+        default=[],
+        help="course directory names to skip (e.g. Einführung_in_die_Rechnerarchitektur)",
+    )
 
     sub.add_parser("index", help="cognify both datasets")
     sub.add_parser("reset", help="wipe cognee + manifest")
@@ -208,7 +223,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.cmd == "ingest":
-        asyncio.run(cmd_ingest(args.directory))
+        asyncio.run(cmd_ingest(args.directory, skip_courses=set(args.skip_courses)))
     elif args.cmd == "index":
         asyncio.run(cmd_index())
     elif args.cmd == "reset":

@@ -39,3 +39,9 @@ for _sub in (_abs / "data", _abs / "system" / "databases", _abs / "cache"):
 # drop the SOCKS entries so httpx falls through to HTTPS_PROXY.
 for _k in ("ALL_PROXY", "all_proxy"):
     os.environ.pop(_k, None)
+
+
+# SQLite "too many SQL variables" fix: cognee's upsert_edges is patched directly
+# in the venv at cognee/modules/graph/methods/upsert_edges.py to split large
+# edge inserts into 2 000-row sub-batches (11 cols × 2 000 = 22 000 placeholders,
+# well under SQLite's 32 766 limit). See iter-log iter 17 for context.

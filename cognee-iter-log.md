@@ -9,20 +9,37 @@ Conventions:
 
 ---
 
+## Iteration 17 — large-PDF fix + full 3-course corpus ingest (119 tests)
+
+**Root cause fixed:** Cognee's `upsert_edges` issues one `INSERT … VALUES (…), (…), …` for all edges in a batch. SQLite caps SQL variables at 32 766; 11 columns/row → max ~2 978 rows per INSERT. Dense CS-textbook PDFs exceed this even at 10 chunks/batch.
+
+- **Fix:** Edited `.venv/…/cognee/modules/graph/methods/upsert_edges.py` directly to split `edges_to_add` into 2 000-row sub-batches before executing. Monkey-patching via `config.py` was attempted but didn't survive the import chain in the seed process — direct venv edit is the reliable approach.
+- **`COGNEE_CHUNKS_PER_BATCH=100`** restored (was reduced to 10 as a workaround; no longer needed). Full corpus cognifies in ~80s instead of the projected 4–9 hours.
+- **CORS added** to `main.py` (`CORSMiddleware, allow_origins=["*"]`) — was blocking Amin's frontend.
+- **`--skip-courses` flag** on `seed ingest` — `Einführung_in_die_Rechnerarchitektur` (126 MB, 10 monster PDFs up to 24 MB) excluded from demo corpus. Remaining 3 courses: DS + EI + Analysis, 28 PDFs, 1356 pages, 11 MB.
+- **Progress tracking in `live_smoke`:** pre-cognify page count + ETA estimate; elapsed time after cognify completes.
+- **DB wipe gotcha corrected:** `find .cognee_system -type f -delete` leaves empty dirs that break LanceDB on next run. Correct command: `find .cognee_system -delete` (removes files AND dirs).
+- **Full end-to-end verified:** 28 files ingested (0 failed), cognify in 79.6s, quiz on "graphs" returns 3 grounded DS questions with `source_ref='Diskrete_Strukturen'`. 119 tests passing, 0 lint.
+
+**Known issue (pre-existing):** With full materials corpus loaded, diary isolation degrades — empty-diary query returns fabricated content instead of `NoDataError`. Prompt-level isolation (iter 15) isn't sufficient when the shared graph is large. Not demo-blocking for quiz flow.
+
+---
+
 ## Status snapshot
 
-- **Repo state:** `main@213ee80` (local + `origin/main` in sync). Iter 16 pushed, clean working tree.
-- **Tests:** 119 passing (`cd backend && uv run pytest`, ~0.7s — 107 ours + 12 from Odin's agent tests). `uv run ruff check` clean.
-- **Live verified:** Iter 16 smoke test on one 50KB PDF (`data/Einführung_in_die_Informatik/materials/folien-11a.pdf`) ran ingest → cognify → quiz → isolation check end-to-end. Real OpenRouter (gpt-4o-mini via LiteLLM tool-use) + OpenAI (embeddings, text-embedding-3-small direct). `source_ref` surfaces as the course label ("Einführung_in_die_Informatik") via `belongs_to_set`. Empty-diary query correctly raises `NoDataError`.
-- **Live smoke harness:** `backend/scripts/live_smoke.py` — `uv run python -m scripts.live_smoke [--pdf PATH] [--course NAME] [--topic TOPIC] [--n N] [--skip-ingest]`. Manual probe, NOT in pytest. Costs ~$0.01, runs ~1–3 min. Defaults to `folien-11a.pdf` + topic "polymorphism".
-- **Corpus on disk:** 42 PDFs at `~/workspace/Hackton/data/<course>/materials/`. 1 ingested (folien-11a.pdf). 41 untested.
+- **Repo state:** `main@213ee80` (local); iter 17 changes uncommitted (pending rebase + push).
+- **Tests:** 119 passing (`cd backend && uv run pytest`, ~0.9s — 107 ours + 12 from Odin's agent tests). `uv run ruff check` clean.
+- **Live verified:** Full 3-course corpus (DS + EI + Analysis, 28 PDFs, 1356 pages) ingested + cognified in ~90s. Quiz on "graphs" returns 3 grounded DS questions with correct source_ref. Diary isolation degraded with full corpus (see open threads).
+- **Live smoke harness:** `backend/scripts/live_smoke.py` — `uv run python -m scripts.live_smoke [--pdf PATH] [--course NAME] [--topic TOPIC] [--n N] [--skip-ingest]`. Now prints page count + ETA before cognify and elapsed time after.
+- **Corpus on disk:** 42 PDFs. 28 ingested (DS + EI + Analysis). ERA (10 PDFs, 126 MB, up to 24 MB each) excluded — too slow to cognify for demo.
 - **Spec deltas:** 14 queued in `notes/spec-deltas.md`. None applied to the spec file itself.
 
 ## Open threads (things that opened but didn't close)
 
-- **Large-PDF cognify fails.** `DS_2023_Script_v1.pdf` (4MB, Diskrete Strukturen) hits `sqlite3.OperationalError: too many SQL variables` — cognee's bulk edge-insert exceeds SQLite's 32k placeholder ceiling. Blocks ingesting the full 42-PDF corpus. Investigate: cognee `DB_PROVIDER=postgres`, cognee chunk-size env knob, or pre-split PDFs.
+- **ERA corpus excluded.** `Einführung_in_die_Rechnerarchitektur` (10 PDFs, 126 MB, up to 24 MB) skipped via `--skip-courses`. Individual files would take hours to cognify. Option: postgres backend, pre-split, or just exclude permanently for demo.
 - **Odin's parallel `/quiz/generate`** at `backend/quiz/generator.py` (from commit `2266c42`). Uses `instructor` + gpt-4o-mini + hardcoded mock schedule; doesn't use cognee. Coexists with our `/quiz`. Amin's frontend will wire against one of them — needs coordination.
-- **CORS missing in `main.py`.** Any browser call from Amin's frontend will be blocked. Outside the original scope fence but demo-blocking.
+- ~~**CORS missing in `main.py`.**~~ Fixed in iter 17.
+- **Diary isolation degraded with full corpus.** Empty-diary query returns fabricated content instead of `NoDataError` once 28 PDFs are cognified. Prompt-level isolation (iter 15) insufficient when shared graph is large. Options: `ENABLE_BACKEND_ACCESS_CONTROL=true`, stronger prompt, or accept (quiz flow unaffected).
 - **Quiz quality on off-topic prompts.** gpt-4o-mini doesn't refuse when the topic has no material; grounds loosely in whatever the retriever returns. Prompt already says "strictly grounded". Options: stronger refusal instruction, explicit "return empty if no relevant content" in the tool schema.
 - **Quiz under-delivery not handled.** If the LLM returns fewer items than `n`, we log a warning and return what we got. Frontend shows "3 questions" when the user asked for 5. Options: retry to fill, re-request, or error out.
 - **`add_diary_entry` still uses raw-string ingest** (unfixed from iter 12). Document.name is `text_<md5>.txt`, not a date. Doesn't matter for quiz (materials-only) but breaks any future diary citation.
@@ -37,7 +54,7 @@ Conventions:
 - **`EMBEDDING_PROVIDER=openai_compatible` hits a cognee bug** (missing `max_completion_tokens` on the engine). Use `EMBEDDING_PROVIDER=openai` + `EMBEDDING_MODEL=openai/text-embedding-3-small` for OpenAI direct via LiteLLM.
 - **Chunks search returns `belongs_to_set`, NOT `is_part_of`.** Source lineage is whatever we pass via `node_set=[…]` at ingest.
 - **Dataset isolation is fictional without `ENABLE_BACKEND_ACCESS_CONTROL=true`.** We went with AC-off + prompt-level isolation (iter 15). Acceptable for demo.
-- **Clean-slate DB required after a crash.** Cognee leaves corrupted empty `.lance` table dirs; `find backend/.cognee_system -type f -delete` before retrying.
+- **Clean-slate DB required after a crash.** Cognee leaves corrupted empty `.lance` table dirs that LanceDB treats as broken tables (not missing ones). `find backend/.cognee_system -type f -delete` is NOT sufficient — it leaves empty dirs. Use `find backend/.cognee_system -delete` (removes files AND dirs) or equivalent.
 
 ---
 
