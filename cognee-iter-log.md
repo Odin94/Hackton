@@ -1,21 +1,43 @@
 # cognee/iter changelog
 
-Running log for the long-lived `cognee/iter` branch. One block per iteration, newest on top. Each block: one-line summary, rationale, files touched, follow-ups.
+Running log for the cognee memory layer. 16 iterations landed on `main` (originally on long-lived `cognee/iter`; merged and deleted after iter 15). Newest on top.
 
 Conventions:
-- Code-only work until OpenRouter key is plugged in — no live cognify/quiz runs, so no live acceptance checks yet.
 - Spec deltas (proposed changes to `notes/spec-cognee.md`) are queued in `notes/spec-deltas.md` — not applied to the spec directly.
-- Scope fence: `backend/app/`, `backend/scripts/`, `backend/seed/`, `backend/tests/` (new). Agent loop, frontend, top-level config untouched.
+- Push directly to main now (since iter 15). Rebase (never merge) when teammates land commits.
+- Scope fence: `backend/app/`, `backend/scripts/`, `backend/seed/`, `backend/tests/`. Agent loop (`backend/agent/` — Odin's), frontend (Amin's) untouched unless coordinated.
 
 ---
 
 ## Status snapshot
 
-- **Tests:** 88 passing (`uv run pytest`, <1s, fully mocked — no network).
-- **Lint:** `uv run ruff check` clean.
-- **Diff vs main:** ~1600 lines added across app/scripts/tests/docs; no main-branch files touched.
-- **Still untested live:** cognee cognify + quiz against a real LLM — plug an OpenRouter key into `backend/.env` and run `uv run python -m scripts.seed index` followed by `curl localhost:8000/quiz ...` to exercise the full path. Spec §10 acceptance cannot be ticked off until then.
-- **Open spec deltas:** 8 queued in `notes/spec-deltas.md` — none applied to the spec file itself, awaiting review.
+- **Repo state:** `main@213ee80` (local + `origin/main` in sync). Iter 16 pushed, clean working tree.
+- **Tests:** 119 passing (`cd backend && uv run pytest`, ~0.7s — 107 ours + 12 from Odin's agent tests). `uv run ruff check` clean.
+- **Live verified:** Iter 16 smoke test on one 50KB PDF (`data/Einführung_in_die_Informatik/materials/folien-11a.pdf`) ran ingest → cognify → quiz → isolation check end-to-end. Real OpenRouter (gpt-4o-mini via LiteLLM tool-use) + OpenAI (embeddings, text-embedding-3-small direct). `source_ref` surfaces as the course label ("Einführung_in_die_Informatik") via `belongs_to_set`. Empty-diary query correctly raises `NoDataError`.
+- **Smoke test harness:** `/tmp/claude/smoke_test.py` — one-shot live probe. Not in the repo, recreate from iter-16 patterns if needed. Imports `app.cognee_service`, ingests one PDF, cognifies, runs `generate_quiz("boolean logic", n=3)`, then queries diary expecting NoDataError.
+- **Corpus on disk:** 42 PDFs at `~/workspace/Hackton/data/<course>/materials/`. 1 ingested (folien-11a.pdf). 41 untested.
+- **Spec deltas:** 14 queued in `notes/spec-deltas.md`. None applied to the spec file itself.
+
+## Open threads (things that opened but didn't close)
+
+- **Large-PDF cognify fails.** `DS_2023_Script_v1.pdf` (4MB, Diskrete Strukturen) hits `sqlite3.OperationalError: too many SQL variables` — cognee's bulk edge-insert exceeds SQLite's 32k placeholder ceiling. Blocks ingesting the full 42-PDF corpus. Investigate: cognee `DB_PROVIDER=postgres`, cognee chunk-size env knob, or pre-split PDFs.
+- **Odin's parallel `/quiz/generate`** at `backend/quiz/generator.py` (from commit `2266c42`). Uses `instructor` + gpt-4o-mini + hardcoded mock schedule; doesn't use cognee. Coexists with our `/quiz`. Amin's frontend will wire against one of them — needs coordination.
+- **CORS missing in `main.py`.** Any browser call from Amin's frontend will be blocked. Outside the original scope fence but demo-blocking.
+- **Quiz quality on off-topic prompts.** gpt-4o-mini doesn't refuse when the topic has no material; grounds loosely in whatever the retriever returns. Prompt already says "strictly grounded". Options: stronger refusal instruction, explicit "return empty if no relevant content" in the tool schema.
+- **Quiz under-delivery not handled.** If the LLM returns fewer items than `n`, we log a warning and return what we got. Frontend shows "3 questions" when the user asked for 5. Options: retry to fill, re-request, or error out.
+- **`add_diary_entry` still uses raw-string ingest** (unfixed from iter 12). Document.name is `text_<md5>.txt`, not a date. Doesn't matter for quiz (materials-only) but breaks any future diary citation.
+- **Page-level citation for PDFs** — pypdf gives "Page N:" markers, cognee's chunker splits by tokens ignoring them. A quiz item can span multiple pages; we can't tell which.
+
+## Environment-specific gotchas (land-mines to remember)
+
+- **Fresh cognee DB can't migrate.** `cognee.run_startup_migrations()` crashes on `ab7e313804ae_permission_system_rework` → `NoSuchTableError("acls")`. Solved: `main.py` wraps in try/except, pipeline `setup()` creates schema lazily on first `add/cognify`.
+- **`.cognee_system/` needs auto-mkdir.** Solved in `app.config`; cognee doesn't create the parent dirs.
+- **Claude Code's `ALL_PROXY=socks5h://…` breaks httpx** (no `socksio` installed). Solved in `app.config` (popped at import).
+- **Ruff import sort breaks config ordering.** Solved by putting `from app import config` in `app/__init__.py` — ruff can't reorder across files.
+- **`EMBEDDING_PROVIDER=openai_compatible` hits a cognee bug** (missing `max_completion_tokens` on the engine). Use `EMBEDDING_PROVIDER=openai` + `EMBEDDING_MODEL=openai/text-embedding-3-small` for OpenAI direct via LiteLLM.
+- **Chunks search returns `belongs_to_set`, NOT `is_part_of`.** Source lineage is whatever we pass via `node_set=[…]` at ingest.
+- **Dataset isolation is fictional without `ENABLE_BACKEND_ACCESS_CONTROL=true`.** We went with AC-off + prompt-level isolation (iter 15). Acceptable for demo.
+- **Clean-slate DB required after a crash.** Cognee leaves corrupted empty `.lance` table dirs; `find backend/.cognee_system -type f -delete` before retrying.
 
 ---
 
