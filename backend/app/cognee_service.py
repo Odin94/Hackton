@@ -27,12 +27,6 @@ class CogneeServiceError(Exception):
         self.retryable = retryable
 
 
-# Default wall-clock cap on the quiz LLM call. Intentionally generous:
-# cognee's own cognify call inside the same process can be much longer, and
-# the quiz endpoint is user-triggered, not background.
-_LLM_TIMEOUT_SECONDS = 30.0
-
-
 @asynccontextmanager
 async def _timed(label: str, **fields: object) -> AsyncIterator[None]:
     """Log duration of a block at INFO. Fields render as key=value pairs."""
@@ -293,11 +287,12 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
                     }
                 },
             ),
-            timeout=_LLM_TIMEOUT_SECONDS,
+            timeout=settings.llm_call_timeout_seconds,
         )
     except asyncio.TimeoutError as e:
         raise CogneeServiceError(
-            f"LLM call exceeded {_LLM_TIMEOUT_SECONDS}s timeout", retryable=True
+            f"LLM call exceeded {settings.llm_call_timeout_seconds}s timeout",
+            retryable=True,
         ) from e
     except Exception as e:
         raise _wrap(e) from e

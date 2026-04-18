@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     llm_api_key: str
     llm_model: str = "openrouter/openai/gpt-4o-mini"
     data_root_directory: str = str(_BACKEND_DIR / ".cognee_system")
+    # Wall-clock cap on our own LiteLLM quiz call. Distinct from any cognee-internal
+    # LLM_TIMEOUT env var — kept separate so a change here can't fight cognee's
+    # own retry/timeout machinery.
+    llm_call_timeout_seconds: float = 30.0
 
 
 settings = Settings()

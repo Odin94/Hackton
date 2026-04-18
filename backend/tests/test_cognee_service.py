@@ -455,9 +455,9 @@ async def test_generate_quiz_rejects_zero_n(mock_cognee, mock_litellm):
 async def test_generate_quiz_llm_timeout_surfaces_as_retryable(
     mock_cognee, mock_litellm, monkeypatch
 ):
-    """When litellm takes longer than _LLM_TIMEOUT_SECONDS, raise retryable error."""
+    """When litellm takes longer than settings.llm_call_timeout_seconds, raise retryable error."""
     mock_cognee.search.return_value = _chunks_with_source()
-    monkeypatch.setattr(cognee_service, "_LLM_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(cognee_service.settings, "llm_call_timeout_seconds", 0.01)
 
     async def slow(*args, **kwargs):
         await asyncio.sleep(0.5)
