@@ -2,7 +2,7 @@ import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import cognee_service
 from app.cognee_service import CogneeServiceError
@@ -10,18 +10,20 @@ from app.types import DiaryEntry, Material, QuizItem
 
 router = APIRouter()
 
+_background_tasks: set[asyncio.Task] = set()
+
 
 class CognifyReq(BaseModel):
     dataset: Literal["diary", "materials"]
 
 
 class QueryReq(BaseModel):
-    q: str
+    q: str = Field(min_length=1, max_length=2000)
 
 
 class QuizReq(BaseModel):
-    topic: str
-    n: int = 5
+    topic: str = Field(min_length=1, max_length=200)
+    n: int = Field(default=5, ge=1, le=20)
 
 
 def _map(exc: Exception) -> HTTPException:
@@ -53,8 +55,15 @@ async def post_material(material: Material) -> dict:
 
 @router.post("/cognify")
 async def post_cognify(req: CognifyReq) -> dict:
-    asyncio.create_task(cognee_service.cognify_dataset(req.dataset))
+    task = asyncio.create_task(cognee_service.cognify_dataset(req.dataset))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"status": "indexing"}
+
+
+@router.get("/health")
+async def get_health() -> dict:
+    return {"status": "ok"}
 
 
 @router.post("/diary/query")
