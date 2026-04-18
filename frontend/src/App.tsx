@@ -15,11 +15,18 @@ type ChatMessage = {
   author: 'user' | 'system'
   sequence_number: number
   content: string
+  processing_ms?: number | null
 }
 
 type ChatReplyResponse = {
   user_message: ChatMessage
   assistant_message: ChatMessage
+}
+
+type ChatSocketPayload = {
+  type: 'chat_message' | 'ack'
+  message?: ChatMessage
+  echo?: string
 }
 
 const TOKEN_KEY = 'hackton-chat-token'
@@ -59,6 +66,54 @@ function App() {
     }
     list.scrollTop = list.scrollHeight
   }, [messages])
+
+  useEffect(() => {
+    if (!token) {
+      return
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const socketUrl = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
+    const socket = new WebSocket(socketUrl)
+
+    socket.addEventListener('open', () => {
+      setStatus((current) =>
+        current === 'Thinking...' ? current : 'Live chat connection ready.',
+      )
+    })
+
+    socket.addEventListener('message', (event) => {
+      const payload = JSON.parse(event.data) as ChatSocketPayload
+      if (payload.type !== 'chat_message' || !payload.message) {
+        return
+      }
+      const incomingMessage = payload.message
+
+      setMessages((current) => {
+        if (current.some((message) => message.id === incomingMessage.id)) {
+          return current
+        }
+        return [...current, incomingMessage]
+      })
+      setStatus('A scheduled notification arrived in chat.')
+    })
+
+    socket.addEventListener('close', () => {
+      setStatus((current) =>
+        token && current !== 'Logged out. Log in again to load chat history.'
+          ? 'Live chat connection closed.'
+          : current,
+      )
+    })
+
+    socket.addEventListener('error', () => {
+      setError('WebSocket connection failed.')
+    })
+
+    return () => {
+      socket.close()
+    }
+  }, [token])
 
   async function loadHistory(activeToken: string) {
     setIsLoadingHistory(true)
@@ -256,7 +311,10 @@ function App() {
               >
                 <div className="message-meta">
                   <span>{message.author === 'user' ? username || 'user' : 'system'}</span>
-                  <span>#{message.sequence_number}</span>
+                  <span>
+                    #{message.sequence_number}
+                    {message.processing_ms != null ? ` · ${message.processing_ms} ms` : ''}
+                  </span>
                 </div>
                 <p>{message.content}</p>
               </article>

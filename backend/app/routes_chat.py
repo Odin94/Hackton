@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import get_user_id
-from app.chat_service import create_chat_reply, list_chat_messages
+from app.chat_service import create_chat_reply, list_chat_messages, serialize_chat_message
 from app.cognee_service import CogneeServiceError
 
 log = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ class ChatMessageResp(BaseModel):
     author: str
     sequence_number: int
     content: str
+    processing_ms: int | None = None
 
 
 class ChatHistoryResp(BaseModel):
@@ -49,15 +51,8 @@ def _require_user_id(authorization: str | None) -> int:
     return user_id
 
 
-def _serialize(message) -> ChatMessageResp:
-    return ChatMessageResp(
-        id=message.id,
-        user_id=message.user_id,
-        timestamp=message.timestamp.isoformat(),
-        author=message.author,
-        sequence_number=message.sequence_number,
-        content=message.content,
-    )
+def _serialize(message, *, processing_ms: int | None = None) -> ChatMessageResp:
+    return ChatMessageResp(**serialize_chat_message(message), processing_ms=processing_ms)
 
 
 @router.get("/chat/history", response_model=ChatHistoryResp, summary="Load chat history")
@@ -73,16 +68,42 @@ async def post_chat_message(
     authorization: str | None = Header(default=None),
 ) -> ChatReplyResp:
     user_id = _require_user_id(authorization)
+    started_at = time.perf_counter()
+    log.debug(
+        "POST /chat/messages user_id=%d content_len=%d preview=%r",
+        user_id,
+        len(req.content),
+        req.content[:160],
+    )
     try:
         user_message, assistant_message = await create_chat_reply(user_id, req.content)
     except ValueError as e:
+        log.warning("POST /chat/messages validation_error user_id=%d error=%s", user_id, e)
         raise HTTPException(status_code=400, detail=str(e)) from e
     except CogneeServiceError as e:
         status = 503 if e.retryable else 500
+        log.warning(
+            "POST /chat/messages cognee_error user_id=%d retryable=%s status=%d error=%s",
+            user_id,
+            e.retryable,
+            status,
+            e,
+        )
         raise HTTPException(status_code=status, detail=str(e)) from e
+    except Exception:
+        log.exception("POST /chat/messages unexpected_error user_id=%d", user_id)
+        raise
 
+    processing_ms = int((time.perf_counter() - started_at) * 1000)
+    log.debug(
+        "POST /chat/messages timing user_id=%d user_message_id=%d assistant_message_id=%d processing_ms=%d",
+        user_id,
+        user_message.id,
+        assistant_message.id,
+        processing_ms,
+    )
     log.info("chat turn stored user_id=%d user_seq=%d system_seq=%d", user_id, user_message.sequence_number, assistant_message.sequence_number)
     return ChatReplyResp(
         user_message=_serialize(user_message),
-        assistant_message=_serialize(assistant_message),
+        assistant_message=_serialize(assistant_message, processing_ms=processing_ms),
     )

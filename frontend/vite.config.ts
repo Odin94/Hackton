@@ -8,6 +8,10 @@ export default defineConfig({
     proxy: {
       '/login': 'http://127.0.0.1:8000',
       '/chat': 'http://127.0.0.1:8000',
+      '/ws': {
+        target: 'ws://127.0.0.1:8000',
+        ws: true,
+      },
     },
   },
 })

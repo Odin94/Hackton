@@ -5,13 +5,14 @@ that lets you open a WebSocket.  Designed for local demo use only.
 """
 
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 
 from agent.database import AsyncSessionLocal
-from agent.models import User
+from agent.models import Notification, User
 from app.auth import create_token
 
 log = logging.getLogger(__name__)
@@ -67,8 +68,34 @@ async def signup(req: UsernameReq) -> AuthResp:
 
         user = User(username=req.username)
         session.add(user)
+        await session.flush()
+
+        schedule_prompt = Notification(
+            user_id=user.id,
+            status="pending",
+            target_datetime=datetime.now(UTC),
+            content=(
+                "Welcome! Please enter your class and study schedule in chat so I can "
+                "save it and personalize reminders and quizzes."
+            ),
+            quiz_id=None,
+        )
+        session.add(schedule_prompt)
+        log.debug(
+            "POST /signup: schedule prompt queued user_id=%d target=%s content_preview=%r",
+            user.id,
+            schedule_prompt.target_datetime.isoformat(),
+            schedule_prompt.content[:120],
+        )
         await session.commit()
         await session.refresh(user)
+        await session.refresh(schedule_prompt)
+        log.debug(
+            "POST /signup: committed user_id=%d schedule_notification_id=%d status=%s",
+            user.id,
+            schedule_prompt.id,
+            schedule_prompt.status,
+        )
 
     log.info("New user signed up: username=%s id=%d", user.username, user.id)
     log.debug("POST /signup → token minted for user_id=%d", user.id)

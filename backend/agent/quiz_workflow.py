@@ -161,9 +161,22 @@ async def _dispatch_due_notifications_impl(session: AsyncSession) -> int:
         )
     ).scalars().all()
 
-    log.debug("dispatch_due_notifications: found %d due notification(s)", len(due))
+    log.debug(
+        "dispatch_due_notifications: found %d due notification(s) ids=%s",
+        len(due),
+        [notif.id for notif in due],
+    )
     dispatched = 0
     for notif in due:
+        log.debug(
+            "dispatch_due_notifications: evaluating notification_id=%d user_id=%d status=%s target=%s quiz_id=%s content_preview=%r",
+            notif.id,
+            notif.user_id,
+            notif.status,
+            notif.target_datetime.isoformat(),
+            notif.quiz_id,
+            notif.content[:120],
+        )
         # Skip if the user has no active WebSocket connection — retry next tick.
         if not ws_manager.is_connected(notif.user_id):
             log.debug(
@@ -176,6 +189,12 @@ async def _dispatch_due_notifications_impl(session: AsyncSession) -> int:
         if notif.quiz_id is not None:
             quiz = await session.get(Quiz, notif.quiz_id)
             if quiz is not None:
+                log.debug(
+                    "dispatch_due_notifications: attaching quiz payload notification_id=%d quiz_id=%d question_count=%d",
+                    notif.id,
+                    quiz.id,
+                    len(quiz.questions),
+                )
                 quiz_payload = {
                     "id": quiz.id,
                     "title": quiz.title,
@@ -183,15 +202,28 @@ async def _dispatch_due_notifications_impl(session: AsyncSession) -> int:
                     "estimated_duration_minutes": quiz.estimated_duration_minutes,
                     "questions": quiz.questions,
                 }
+            else:
+                log.warning(
+                    "dispatch_due_notifications: quiz missing for notification_id=%d quiz_id=%s",
+                    notif.id,
+                    notif.quiz_id,
+                )
 
+        payload = {
+            "type": "notification",
+            "notification_id": notif.id,
+            "content": notif.content,
+            "quiz": quiz_payload,
+        }
+        log.debug(
+            "dispatch_due_notifications: sending notification_id=%d user_id=%d payload_keys=%s",
+            notif.id,
+            notif.user_id,
+            list(payload.keys()),
+        )
         sent = await ws_manager.send(
             notif.user_id,
-            {
-                "type": "notification",
-                "notification_id": notif.id,
-                "content": notif.content,
-                "quiz": quiz_payload,
-            },
+            payload,
         )
 
         if not sent:
@@ -207,9 +239,15 @@ async def _dispatch_due_notifications_impl(session: AsyncSession) -> int:
             notif.user_id, notif.id,
         )
         notif.status = "complete"
+        log.debug(
+            "dispatch_due_notifications: notification completed notification_id=%d user_id=%d",
+            notif.id,
+            notif.user_id,
+        )
         dispatched += 1
 
     if dispatched:
+        log.debug("dispatch_due_notifications: committing dispatched=%d", dispatched)
         await session.commit()
     log.debug("Notification dispatch: %d sent", dispatched)
     return dispatched
