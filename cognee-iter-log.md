@@ -19,6 +19,17 @@ Conventions:
 
 ---
 
+## Iteration 11 — typed error hierarchy + quiz simplification (89 tests)
+
+**Motivation:** "reliable and simple" — live acceptance blocked on materials, so focus on things that improve both without needing real data.
+
+- **Typed errors:** Added `NoDataError`, `LLMTimeoutError`, `MalformedLLMResponseError`, `UpstreamRateLimitError`, `UpstreamError` as `CogneeServiceError` subclasses. `_wrap()` pattern-matches exception message + class to return the most specific subclass (falls back to base for unknown). Callers can branch on type instead of string-matching `detail`. HTTP error mapping unchanged (all subclasses still `isinstance(CogneeServiceError)`).
+- **Quiz call-graph flattened:** Merged `_generate_quiz_inner` + `_quiz_llm_call_with_retry` into `generate_quiz`. Kept `_quiz_llm_call` as the single-attempt helper. Retry loop is now inline and only targets `MalformedLLMResponseError` (previously retried on any retryable error — timeouts were retried at the same budget, which doesn't help).
+- **Error-site routing:** `generate_quiz` now raises `NoDataError` for empty-chunks / textless-chunks (was base class), `LLMTimeoutError` on `asyncio.wait_for` timeout (was base class), `MalformedLLMResponseError` on JSON/shape failure (was base class). Agent loop can now distinguish "cognify hasn't run" from "LLM flaked" without string parsing.
+- **Tests:** +1 (`test_all_subclasses_are_cognee_service_error`); several existing tests tightened to `pytest.raises(NoDataError)` / `LLMTimeoutError` / `MalformedLLMResponseError` instead of the base class. 89 passing, 0 lint.
+
+Logged as delta 9 in `notes/spec-deltas.md`.
+
 ## Iteration 10 — ruff lint gate (88 tests, 0 lint issues)
 
 - Added `ruff>=0.6` to dev deps and a minimal `[tool.ruff]` config in `pyproject.toml`: line length 100, target py312, rules `E F I UP B SIM`, ignores `E501`/`B008`/`SIM117` as situational false-positives.

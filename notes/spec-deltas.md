@@ -24,6 +24,13 @@ Format per entry:
 - **Why:** Trivial liveness endpoint — useful for frontend boot checks and for detecting config misconfiguration (since `config.py` raises at import, a responding `/health` proves env is wired).
 - **Status:** proposed — implemented on `cognee/iter`. Spec table not yet amended.
 
+## Delta 9 — Typed error hierarchy
+
+- **Section:** §3 service / §4 error mapping.
+- **Change:** `CogneeServiceError` now has concrete subclasses: `NoDataError`, `LLMTimeoutError`, `MalformedLLMResponseError`, `UpstreamRateLimitError`, `UpstreamError`. Each sets a sensible `default_retryable`. `_wrap()` returns the specific subclass when the underlying exception matches a known pattern, otherwise the base class (treated as non-retryable). All subclasses still pass `isinstance(exc, CogneeServiceError)`, so §4 HTTP mapping continues to work without changes.
+- **Why:** Callers (agent loop, frontend) can branch on `isinstance(e, NoDataError)` to emit "please wait for cognify" UX, rather than string-matching `detail`. Quiz retry logic is also cleaner — retry only on `MalformedLLMResponseError`, not on "any retryable" (which was eating timeouts).
+- **Status:** proposed — implemented on main via cognee/iter. Spec text not yet amended.
+
 ## Delta 7 — LLM timeout + duration logging
 
 - **Section:** §3 service / §6 config / §9 risks.
