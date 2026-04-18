@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -41,6 +42,35 @@ _DEMO_STATUS_AWAITING_ENERGY = "awaiting_energy_checkin"
 _DEMO_STATUS_COMPLETE = "complete"
 _DEMO_DEFAULT_AVERAGE_SCORE_PERCENT = 72
 _DEMO_MINUTES_PER_QUESTION = 2
+
+# Messages longer than this that don't match the skip pattern still get cognee.
+_COGNEE_LONG_MESSAGE_THRESHOLD = 80
+# Keywords that strongly signal the user wants to retrieve stored knowledge.
+_COGNEE_TRIGGER_RE = re.compile(
+    r"\b("
+    r"explain|tell me|describe|summarize|recap|overview|"
+    r"what is|what are|what do|what did|what does|what was|"
+    r"how does|how do|how is|how are|how was|"
+    r"why|"
+    r"lecture|slide|slides|material|materials|concept|topic|theory|"
+    r"algorithm|formula|theorem|definition|"
+    r"diary|journal|habit|pattern|stress|energy|feel|feeling|mood|wellbeing|"
+    r"remember|recall|know about|learned|studied|review"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_cognee_context(message: str) -> bool:
+    """Return True if cognee retrieval is likely needed for this message.
+
+    Skips cognee for short conversational turns and onboarding replies where
+    SQLite context is sufficient, saving 4-7s per turn.
+    """
+    stripped = message.strip()
+    if _COGNEE_TRIGGER_RE.search(stripped):
+        return True
+    return len(stripped) > _COGNEE_LONG_MESSAGE_THRESHOLD
 
 
 @dataclass
@@ -689,11 +719,25 @@ async def _generate_chat_response(
         len(latest_user_message),
         _preview(latest_user_message),
     )
-    history, sqlite_context, cognee_context = await asyncio.gather(
-        _list_chat_messages(session, user_id),
-        _build_sqlite_context(session, user_id),
-        _build_cognee_context(latest_user_message),
+    needs_cognee = _needs_cognee_context(latest_user_message)
+    log.debug(
+        "chat._generate_chat_response cognee_decision user_id=%d needs_cognee=%s msg_len=%d",
+        user_id,
+        needs_cognee,
+        len(latest_user_message),
     )
+    if needs_cognee:
+        history, sqlite_context, cognee_context = await asyncio.gather(
+            _list_chat_messages(session, user_id),
+            _build_sqlite_context(session, user_id),
+            _build_cognee_context(latest_user_message),
+        )
+    else:
+        history, sqlite_context = await asyncio.gather(
+            _list_chat_messages(session, user_id),
+            _build_sqlite_context(session, user_id),
+        )
+        cognee_context = ""
     demo_state = await _demo_state_for_user(session, user_id)
     log.debug(
         "chat._generate_chat_response context_ready user_id=%d history_count=%d sqlite_len=%d cognee_len=%d",

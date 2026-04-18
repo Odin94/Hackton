@@ -419,21 +419,28 @@ function App() {
               <p>No saved messages yet.</p>
             </div>
           ) : (
-            messages.map((message) => (
-              <article
-                key={message.id}
-                className={`message-bubble message-${message.author}`}
-              >
-                <div className="message-meta">
-                  <span>{message.author === 'user' ? username || 'user' : 'system'}</span>
-                  <span>
-                    #{message.sequence_number}
-                    {message.processing_ms != null ? ` · ${message.processing_ms} ms` : ''}
-                  </span>
-                </div>
-                <p>{message.content}</p>
-              </article>
-            ))
+            <>
+              {messages.map((message) => (
+                <article
+                  key={message.id}
+                  className={`message-bubble message-${message.author}`}
+                >
+                  <div className="message-meta">
+                    <span>{message.author === 'user' ? username || 'user' : 'system'}</span>
+                    <span>
+                      #{message.sequence_number}
+                      {message.processing_ms != null ? ` · ${message.processing_ms} ms` : ''}
+                    </span>
+                  </div>
+                  <p>{message.content}</p>
+                </article>
+              ))}
+              {isSending && (
+                <article className="message-bubble message-system typing-indicator">
+                  <span /><span /><span />
+                </article>
+              )}
+            </>
           )}
         </div>
 
