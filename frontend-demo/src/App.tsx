@@ -74,21 +74,11 @@ const SCENE_G_USER_LINE =
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 const TYPING_MS_PER_CHAR = 18
+const POST_USER_GAP_MS = 1800
+const POST_BUBBLE_BREATH_MS = 1400
 
 function typingDurationMs(text: string): number {
   return Math.max(600, text.length * TYPING_MS_PER_CHAR)
-}
-
-async function typeInto(
-  setDraft: (text: string) => void,
-  text: string,
-  perChar = 35,
-) {
-  setDraft('')
-  for (let i = 0; i < text.length; i += 1) {
-    setDraft(text.slice(0, i + 1))
-    await sleep(perChar)
-  }
 }
 
 function App() {
@@ -254,7 +244,7 @@ function App() {
         ? current
         : [...current, body.user_message],
     )
-    await sleep(typingDurationMs(userContent) + 900)
+    await sleep(typingDurationMs(userContent) + POST_USER_GAP_MS)
     setMessages((current) =>
       current.some((m) => m.id === body.assistant_message.id)
         ? current
@@ -286,17 +276,11 @@ function App() {
       await waitForSocketOpen()
       setStatus('Scene A — TumTum proactive ping')
       await sendSystemMessage(SCENE_A_PING)
-      await sleep(typingDurationMs(SCENE_A_PING) + 1200)
+      await sleep(typingDurationMs(SCENE_A_PING) + POST_BUBBLE_BREATH_MS)
 
-      setStatus('Scene B — Odin replies')
-      await typeInto(setDraft, SCENE_B_USER_LINE)
-      await sleep(500)
-
-      setStatus('Scene C — scripted coach reply')
-      const outgoing = SCENE_B_USER_LINE
-      setDraft('')
-      await sendScriptedTurn(outgoing, SCENE_C_REPLY)
-      await sleep(typingDurationMs(SCENE_C_REPLY) + 1600)
+      setStatus('Scene B + C — Odin asks, TumTum replies')
+      await sendScriptedTurn(SCENE_B_USER_LINE, SCENE_C_REPLY)
+      await sleep(typingDurationMs(SCENE_C_REPLY) + POST_BUBBLE_BREATH_MS)
 
       setStatus('Scene D — 3-question MC quiz')
       setQuizAutoPlay(true)
@@ -308,17 +292,14 @@ function App() {
 
       const recap = `${SCENE_E_RECAP_PREFIX}?/?${SCENE_E_RECAP_BODY}`
       setStatus('Scene E — performance recap (auto-fires from quiz)')
-      await sleep(typingDurationMs(recap) + 1800)
+      await sleep(typingDurationMs(recap) + POST_BUBBLE_BREATH_MS)
 
       setStatus('Scene F — mood check-in')
       await sendSystemMessage(SCENE_F_MOOD_PING)
-      await sleep(typingDurationMs(SCENE_F_MOOD_PING) + 1200)
+      await sleep(typingDurationMs(SCENE_F_MOOD_PING) + POST_BUBBLE_BREATH_MS)
 
       setStatus('Scene G — live LLM adaptive reply')
-      await typeInto(setDraft, SCENE_G_USER_LINE)
-      await sleep(500)
       const live = SCENE_G_USER_LINE
-      setDraft('')
       setIsSending(true)
       try {
         const response = await fetch('/chat/messages', {
@@ -338,13 +319,13 @@ function App() {
             ? current
             : [...current, body.user_message],
         )
-        await sleep(typingDurationMs(live) + 900)
+        await sleep(typingDurationMs(live) + POST_USER_GAP_MS)
         setMessages((current) =>
           current.some((m) => m.id === body.assistant_message.id)
             ? current
             : [...current, body.assistant_message],
         )
-        await sleep(typingDurationMs(body.assistant_message.content) + 1000)
+        await sleep(typingDurationMs(body.assistant_message.content) + POST_BUBBLE_BREATH_MS)
       } finally {
         setIsSending(false)
       }
@@ -574,6 +555,41 @@ const MOCK_FOCUS_STATS = {
   minutes_goal: 180,
 }
 
+const MOCK_STREAK_WEEK: { label: string; minutes: number }[] = [
+  { label: 'Fr', minutes: 145 },
+  { label: 'Sa', minutes: 60 },
+  { label: 'Su', minutes: 20 },
+  { label: 'Mo', minutes: 165 },
+  { label: 'Tu', minutes: 110 },
+  { label: 'We', minutes: 180 },
+  { label: 'Th', minutes: 92 },
+]
+
+const MOCK_TOPIC_FOCUS: {
+  topic: string
+  course: string
+  mastery: number
+  trend: 'up' | 'down' | 'flat'
+}[] = [
+  { topic: 'Powerset construction', course: 'DS', mastery: 62, trend: 'up' },
+  { topic: 'ε-closures', course: 'DS', mastery: 78, trend: 'up' },
+  { topic: 'Rekursion (H5)', course: 'EInf', mastery: 44, trend: 'flat' },
+  { topic: 'Cache hierarchies', course: 'ERA', mastery: 71, trend: 'down' },
+]
+
+const MOCK_RECENT_WINS: { when: string; text: string }[] = [
+  { when: '11:14', text: 'Mastered 8 flashcards on ε-closures' },
+  { when: '10:02', text: 'Reviewed DS folien-14 (full set)' },
+  { when: 'yesterday', text: 'Finished DS Übungsblatt 7 · 9/10' },
+  { when: 'yesterday', text: 'Unlocked "5-day streak" milestone' },
+]
+
+const MOCK_QUICK_ACTIONS = [
+  { key: 'pomodoro', label: 'Start 25-min focus' },
+  { key: 'flashcards', label: 'Flashcards: DS (12 due)' },
+  { key: 'tumtum', label: 'Ask TumTum anything' },
+]
+
 function Sidebar({ overview }: { overview: OverviewResp | null }) {
   return (
     <aside className="sidebar">
@@ -618,6 +634,45 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
             }}
           />
         </div>
+        <div className="sidebar-heatmap" aria-label="Last 7 days of focus minutes">
+          {MOCK_STREAK_WEEK.map((day, idx) => {
+            const level = Math.min(4, Math.floor(day.minutes / 45))
+            return (
+              <div
+                key={idx}
+                className={`sidebar-heatmap-cell sidebar-heatmap-lvl-${level}`}
+                title={`${day.label}: ${day.minutes} min`}
+              >
+                <span className="sidebar-heatmap-label">{day.label}</span>
+              </div>
+            )
+          })}
+        </div>
+      </SidebarSection>
+
+      <SidebarSection title="Topic focus">
+        <ul className="sidebar-list sidebar-topics">
+          {MOCK_TOPIC_FOCUS.map((t, idx) => (
+            <li key={idx} className="sidebar-topic">
+              <div className="sidebar-topic-head">
+                <span className="sidebar-topic-title">{t.topic}</span>
+                <span className={`sidebar-topic-trend sidebar-topic-trend-${t.trend}`}>
+                  {t.trend === 'up' ? '↑' : t.trend === 'down' ? '↓' : '→'}
+                </span>
+              </div>
+              <div className="sidebar-topic-meta">
+                <span className="sidebar-topic-course">{t.course}</span>
+                <span className="sidebar-topic-pct">{t.mastery}%</span>
+              </div>
+              <div className="sidebar-topic-bar" aria-hidden>
+                <div
+                  className="sidebar-topic-bar-fill"
+                  style={{ width: `${t.mastery}%` }}
+                />
+              </div>
+            </li>
+          ))}
+        </ul>
       </SidebarSection>
 
       <SidebarSection title="Study plan">
@@ -654,6 +709,28 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
         ) : (
           <p className="sidebar-empty">No courses on file.</p>
         )}
+      </SidebarSection>
+
+      <SidebarSection title="Recent wins">
+        <ul className="sidebar-list sidebar-wins">
+          {MOCK_RECENT_WINS.map((win, idx) => (
+            <li key={idx} className="sidebar-win">
+              <span className="sidebar-win-when">{win.when}</span>
+              <span className="sidebar-win-text">{win.text}</span>
+            </li>
+          ))}
+        </ul>
+      </SidebarSection>
+
+      <SidebarSection title="Quick actions">
+        <div className="sidebar-actions">
+          {MOCK_QUICK_ACTIONS.map((a) => (
+            <button key={a.key} type="button" className="sidebar-action">
+              <span className="sidebar-action-label">{a.label}</span>
+              <span className="sidebar-action-chev" aria-hidden>›</span>
+            </button>
+          ))}
+        </div>
       </SidebarSection>
 
       <SidebarSection title="Upcoming events">
