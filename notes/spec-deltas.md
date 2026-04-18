@@ -24,6 +24,15 @@ Format per entry:
 - **Why:** Trivial liveness endpoint — useful for frontend boot checks and for detecting config misconfiguration (since `config.py` raises at import, a responding `/health` proves env is wired).
 - **Status:** proposed — implemented on `cognee/iter`. Spec table not yet amended.
 
+## Delta 12 — `add_material_from_file` + PDF support + course-nested seed layout
+
+- **Section:** §3 service / §5 seed CLI / §6 supported formats.
+- **Change:** New `add_material_from_file(path, course)` that passes the file path directly to `cognee.add(..., node_set=[course])`. Cognee's native `PyPdfLoader` handles `.pdf` during ingest (pypdf is already a cognee dep — no new libs). `.md`/`.txt` use the text loader. `Document.name` is preserved for all three extensions.
+- **Seed CLI:** `cmd_ingest` auto-detects flat (`<root>/materials/…`) and course-nested (`<root>/<course>/materials/…`) layouts. `.pdf` added to `SUPPORTED_MATERIAL_SUFFIXES`. Digest now bytes-based (supports binary).
+- **Why:** Original spec §5 assumed flat markdown ingest. Real corpus is a four-course PDF dump under `data/<course>/materials/`. Routing to cognee's native loader keeps our layer simple — no offline pre-extract step.
+- **`node_set=[course]` metadata:** attaches the course label so GRAPH_COMPLETION searches can filter on `node_name=[course]` later. CHUNKS search still ignores `node_name` (node_name verification from an earlier session), so course filtering at quiz time would require either switching quiz to GRAPH_COMPLETION (loses chunk lineage) or post-filter on chunk payload metadata.
+- **Status:** implemented on `cognee/iter`. Needs live-run confirmation that cognee's PDF extraction cleanly handles all 42 PDFs in amin's corpus (some encrypted / OCR-scanned slides may fail per-file without aborting the run, thanks to iter-6 resilience).
+
 ## Delta 10 — `add_material` ingests as a file path (source_ref preservation)
 
 - **Section:** §3 service / §10 acceptance item 4.

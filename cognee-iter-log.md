@@ -19,6 +19,20 @@ Conventions:
 
 ---
 
+## Iteration 13 — multi-course corpus + PDF ingest (98 tests)
+
+Amin pushed the real study materials: 42 PDFs across 4 courses in `/data/<course>/materials/`. Plumbing updated.
+
+- **`add_material_from_file(path, course)`** new entry point. Hands the absolute path directly to `cognee.add(..., node_set=[course])` — no tempfile write, no body mutation. Cognee picks the right loader: `PyPdfLoader` (pypdf already installed as cognee dep) for `.pdf`, text loader for `.md`/`.txt`. `Document.name` preserved for all three, so `QuizItem.source_ref` shows the real filename.
+- **Seed CLI restructured** (`scripts/seed.py`). `cmd_ingest` now auto-detects two layouts via the new `_find_material_dirs(root)` helper:
+  - Flat: `<root>/materials/…` → course = `"seed"`.
+  - Course-nested: `<root>/<course-name>/materials/…` → course = dir name.
+  Diary stays flat at `<root>/diary/`. Hidden dirs (`.git`, `.venv`) skipped. Manifest digest now computed from raw bytes so PDFs round-trip SHA256 correctly.
+- **`SUPPORTED_MATERIAL_SUFFIXES = {".md", ".txt", ".pdf"}`** — diary stays `.md`/`.txt` only.
+- **Existing `add_material(Material)`** unchanged semantically, plus `node_set=[material.course]` for consistency.
+- **Tests:** +7 new (`_find_material_dirs_*` × 4, `test_cmd_ingest_flat_layout`, `test_cmd_ingest_nested_layout_with_pdfs`, `add_material_from_file_*` × 4, `test_cmd_ingest_no_materials_dir_processes_diary`). Updated existing `add_material` tests to use `**kwargs` capture. 98 passing, 0 lint.
+- **README** + spec delta 12 logged.
+
 ## Iteration 12 — critical bug fixes from audit (91 tests)
 
 Two confirmed-broken issues, fixed:
