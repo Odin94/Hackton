@@ -119,7 +119,9 @@ async def post_scripted_turn(
         await session.refresh(user_message)
         await session.refresh(system_message)
 
-    await _push_chat_message(user_id, system_message)
+    # Client sequences the two bubbles from the HTTP response so the user
+    # message shows before the system reply. Pushing via WS here would race
+    # the HTTP response and flip the order.
     return ScriptedTurnResp(
         user_message=ChatMessageResp(**serialize_chat_message(user_message)),
         assistant_message=ChatMessageResp(**serialize_chat_message(system_message)),

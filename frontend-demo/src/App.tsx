@@ -72,6 +72,12 @@ const SCENE_G_USER_LINE =
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
+const TYPING_MS_PER_CHAR = 18
+
+function typingDurationMs(text: string): number {
+  return Math.max(600, text.length * TYPING_MS_PER_CHAR)
+}
+
 async function typeInto(
   setDraft: (text: string) => void,
   text: string,
@@ -97,6 +103,7 @@ function App() {
   const listRef = useRef<HTMLDivElement | null>(null)
   const quizDoneResolverRef = useRef<(() => void) | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
+  const animatedIdsRef = useRef<Set<number>>(new Set())
 
   useEffect(() => {
     if (token) {
@@ -241,15 +248,17 @@ function App() {
       user_message: ChatMessage
       assistant_message: ChatMessage
     }
-    setMessages((current) => {
-      const next = [...current]
-      for (const message of [body.user_message, body.assistant_message]) {
-        if (!next.some((m) => m.id === message.id)) {
-          next.push(message)
-        }
-      }
-      return next
-    })
+    setMessages((current) =>
+      current.some((m) => m.id === body.user_message.id)
+        ? current
+        : [...current, body.user_message],
+    )
+    await sleep(typingDurationMs(userContent) + 900)
+    setMessages((current) =>
+      current.some((m) => m.id === body.assistant_message.id)
+        ? current
+        : [...current, body.assistant_message],
+    )
   }
 
   async function sendSystemMessage(content: string) {
@@ -276,7 +285,7 @@ function App() {
       await waitForSocketOpen()
       setStatus('Scene A — TumTum proactive ping')
       await sendSystemMessage(SCENE_A_PING)
-      await sleep(3500)
+      await sleep(typingDurationMs(SCENE_A_PING) + 1200)
 
       setStatus('Scene B — Odin replies')
       await typeInto(setDraft, SCENE_B_USER_LINE)
@@ -286,7 +295,7 @@ function App() {
       const outgoing = SCENE_B_USER_LINE
       setDraft('')
       await sendScriptedTurn(outgoing, SCENE_C_REPLY)
-      await sleep(4000)
+      await sleep(typingDurationMs(SCENE_C_REPLY) + 1600)
 
       setStatus('Scene D — 3-question MC quiz')
       setQuizAutoPlay(true)
@@ -296,12 +305,13 @@ function App() {
       })
       await quizDone
 
+      const recap = `${SCENE_E_RECAP_PREFIX}?/?${SCENE_E_RECAP_BODY}`
       setStatus('Scene E — performance recap (auto-fires from quiz)')
-      await sleep(4500)
+      await sleep(typingDurationMs(recap) + 1800)
 
       setStatus('Scene F — mood check-in')
       await sendSystemMessage(SCENE_F_MOOD_PING)
-      await sleep(3500)
+      await sleep(typingDurationMs(SCENE_F_MOOD_PING) + 1200)
 
       setStatus('Scene G — live LLM adaptive reply')
       await typeInto(setDraft, SCENE_G_USER_LINE)
@@ -322,15 +332,18 @@ function App() {
           throw new Error(`chat ${response.status}`)
         }
         const body = (await response.json()) as ChatReplyResponse
-        setMessages((current) => {
-          const next = [...current]
-          for (const message of [body.user_message, body.assistant_message]) {
-            if (!next.some((m) => m.id === message.id)) {
-              next.push(message)
-            }
-          }
-          return next
-        })
+        setMessages((current) =>
+          current.some((m) => m.id === body.user_message.id)
+            ? current
+            : [...current, body.user_message],
+        )
+        await sleep(typingDurationMs(live) + 900)
+        setMessages((current) =>
+          current.some((m) => m.id === body.assistant_message.id)
+            ? current
+            : [...current, body.assistant_message],
+        )
+        await sleep(typingDurationMs(body.assistant_message.content) + 1000)
       } finally {
         setIsSending(false)
       }
@@ -454,7 +467,11 @@ function App() {
                       {message.processing_ms != null ? ` · ${message.processing_ms} ms` : ''}
                     </span>
                   </div>
-                  <p>{message.content}</p>
+                  <TypingText
+                    content={message.content}
+                    shouldAnimate={!animatedIdsRef.current.has(message.id)}
+                    onDone={() => animatedIdsRef.current.add(message.id)}
+                  />
                 </article>
               ))
             )}
@@ -504,6 +521,58 @@ function App() {
   )
 }
 
+function TypingText({
+  content,
+  shouldAnimate,
+  onDone,
+}: {
+  content: string
+  shouldAnimate: boolean
+  onDone?: () => void
+}) {
+  const [shown, setShown] = useState(shouldAnimate ? 0 : content.length)
+
+  useEffect(() => {
+    if (!shouldAnimate) {
+      return
+    }
+    if (shown >= content.length) {
+      onDone?.()
+      return
+    }
+    const handle = setTimeout(() => {
+      setShown((s) => Math.min(s + 1, content.length))
+    }, TYPING_MS_PER_CHAR)
+    return () => clearTimeout(handle)
+  }, [shouldAnimate, shown, content, onDone])
+
+  const isTyping = shouldAnimate && shown < content.length
+  return (
+    <p>
+      {content.slice(0, shown)}
+      {isTyping ? <span className="typing-caret" aria-hidden /> : null}
+    </p>
+  )
+}
+
+const MOCK_STUDY_PLAN: {
+  time: string
+  title: string
+  status: 'done' | 'now' | 'next'
+}[] = [
+  { time: '09:30', title: 'DS · NFA → DFA lecture', status: 'done' },
+  { time: '11:00', title: 'Coffee + flashcards', status: 'done' },
+  { time: '13:00', title: 'Powerset drill (3Q)', status: 'now' },
+  { time: '15:30', title: 'EInf H5 prep', status: 'next' },
+  { time: '17:00', title: 'Library — DS Übungsblatt 8', status: 'next' },
+]
+
+const MOCK_FOCUS_STATS = {
+  streak_days: 6,
+  minutes_today: 92,
+  minutes_goal: 180,
+}
+
 function Sidebar({ overview }: { overview: OverviewResp | null }) {
   return (
     <aside className="sidebar">
@@ -514,6 +583,61 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
           <p className="sidebar-brand-sub">Study coach</p>
         </div>
       </div>
+
+      <SidebarSection title="Focus today">
+        <div className="sidebar-stats">
+          <div className="sidebar-stat">
+            <span className="sidebar-stat-value">{MOCK_FOCUS_STATS.streak_days}d</span>
+            <span className="sidebar-stat-label">streak</span>
+          </div>
+          <div className="sidebar-stat">
+            <span className="sidebar-stat-value">
+              {MOCK_FOCUS_STATS.minutes_today}m
+            </span>
+            <span className="sidebar-stat-label">
+              of {MOCK_FOCUS_STATS.minutes_goal}m
+            </span>
+          </div>
+        </div>
+        <div
+          className="sidebar-progress"
+          role="progressbar"
+          aria-valuenow={MOCK_FOCUS_STATS.minutes_today}
+          aria-valuemin={0}
+          aria-valuemax={MOCK_FOCUS_STATS.minutes_goal}
+        >
+          <div
+            className="sidebar-progress-fill"
+            style={{
+              width: `${Math.min(
+                100,
+                (MOCK_FOCUS_STATS.minutes_today / MOCK_FOCUS_STATS.minutes_goal) * 100,
+              )}%`,
+            }}
+          />
+        </div>
+      </SidebarSection>
+
+      <SidebarSection title="Study plan">
+        <ul className="sidebar-list sidebar-plan">
+          {MOCK_STUDY_PLAN.map((slot, idx) => (
+            <li
+              key={idx}
+              className={`sidebar-plan-item sidebar-plan-${slot.status}`}
+            >
+              <span className="sidebar-plan-time">{slot.time}</span>
+              <span className="sidebar-plan-title">{slot.title}</span>
+              <span className="sidebar-plan-badge">
+                {slot.status === 'done'
+                  ? '✓'
+                  : slot.status === 'now'
+                    ? 'now'
+                    : ''}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </SidebarSection>
 
       <SidebarSection title="Courses">
         {overview && overview.courses.length > 0 ? (
