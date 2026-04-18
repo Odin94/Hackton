@@ -160,12 +160,11 @@ async def test_add_material_ingests_as_file_preserving_source_name(mock_cognee):
 
     captured: dict = {}
 
-    async def capture(data, dataset_name):
+    async def capture(**kwargs):
         # Record state while the file still exists (it's deleted after cognee.add returns).
-        captured["data"] = data
-        captured["dataset_name"] = dataset_name
-        captured["filename"] = Path(data).name
-        captured["content"] = Path(data).read_text(encoding="utf-8")
+        captured.update(kwargs)
+        captured["filename"] = Path(kwargs["data"]).name
+        captured["content"] = Path(kwargs["data"]).read_text(encoding="utf-8")
 
     mock_cognee.add.side_effect = capture
 
@@ -177,6 +176,8 @@ async def test_add_material_ingests_as_file_preserving_source_name(mock_cognee):
     assert Path(captured["data"]).is_absolute()
     # Filename IS the original source — the whole point of the fix.
     assert captured["filename"] == "ml-l3.md"
+    # Course is attached via node_set metadata so GRAPH_COMPLETION can filter on it.
+    assert captured["node_set"] == ["ML-L3"]
     # Header + text still present in the file content so the entity extractor sees them.
     assert captured["content"].startswith("[source=ml-l3.md course=ML-L3]\n")
     assert "Transformers explained..." in captured["content"]
@@ -191,9 +192,9 @@ async def test_add_material_sanitizes_unsafe_source_filename(mock_cognee):
 
     captured: dict = {}
 
-    async def capture(data, dataset_name):
-        captured["filename"] = Path(data).name
-        captured["parent"] = str(Path(data).parent)
+    async def capture(**kwargs):
+        captured["filename"] = Path(kwargs["data"]).name
+        captured["parent"] = str(Path(kwargs["data"]).parent)
 
     mock_cognee.add.side_effect = capture
 
@@ -213,8 +214,8 @@ async def test_add_material_cleans_up_tempdir_on_cognee_failure(mock_cognee):
 
     captured: dict = {}
 
-    async def capture(data, dataset_name):
-        captured["data"] = data
+    async def capture(**kwargs):
+        captured["data"] = kwargs["data"]
         raise RuntimeError("cognee down")
 
     mock_cognee.add.side_effect = capture
@@ -224,6 +225,49 @@ async def test_add_material_cleans_up_tempdir_on_cognee_failure(mock_cognee):
         await cognee_service.add_material(mat)
 
     assert not Path(captured["data"]).parent.exists()
+
+
+# ----- add_material_from_file ---------------------------------------------
+
+@pytest.mark.asyncio
+async def test_add_material_from_file_passes_path_directly(mock_cognee, tmp_path):
+    """File-path ingest routes the real path (and course via node_set) to cognee.
+    No temp write, no body mutation — cognee's loader picks text/pypdf."""
+    pdf = tmp_path / "Script_01.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")  # content doesn't matter; cognee.add is mocked
+
+    await cognee_service.add_material_from_file(pdf, course="Analysis_für_Informatik")
+
+    kwargs = mock_cognee.add.await_args.kwargs
+    assert kwargs["dataset_name"] == "materials"
+    assert kwargs["data"] == str(pdf.resolve())
+    assert kwargs["node_set"] == ["Analysis_für_Informatik"]
+
+
+@pytest.mark.asyncio
+async def test_add_material_from_file_rejects_missing_file(mock_cognee, tmp_path):
+    missing = tmp_path / "does_not_exist.pdf"
+    with pytest.raises(ValueError, match="not a file"):
+        await cognee_service.add_material_from_file(missing, course="C")
+    mock_cognee.add.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_add_material_from_file_rejects_empty_course(mock_cognee, tmp_path):
+    f = tmp_path / "x.md"
+    f.write_text("hi")
+    with pytest.raises(ValueError, match="empty course"):
+        await cognee_service.add_material_from_file(f, course="   ")
+
+
+@pytest.mark.asyncio
+async def test_add_material_from_file_wraps_cognee_failures(mock_cognee, tmp_path):
+    mock_cognee.add.side_effect = RuntimeError("pypdf crashed on encrypted PDF")
+    f = tmp_path / "x.pdf"
+    f.write_bytes(b"stub")
+    with pytest.raises(CogneeServiceError) as excinfo:
+        await cognee_service.add_material_from_file(f, course="C")
+    assert "pypdf" in str(excinfo.value)
 
 
 # ----- cognify_dataset -----------------------------------------------------

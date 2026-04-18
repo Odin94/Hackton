@@ -11,6 +11,7 @@ import pytest
 from app import cognee_service
 from scripts import seed
 
+# ----- _parse_diary_date ---------------------------------------------------
 
 def test_parse_diary_date_happy():
     ts = seed._parse_diary_date("2026-04-08-mon")
@@ -28,80 +29,138 @@ def test_parse_diary_date_invalid_returns_none():
     assert seed._parse_diary_date("2026-13-01") is None  # bad month
 
 
-def test_parse_course_happy():
-    assert seed._parse_course("ml-l3-transformers") == "ML-L3"
-    assert seed._parse_course("cs-101-intro") == "CS-101"
+# ----- _find_material_dirs -------------------------------------------------
+
+def test_find_material_dirs_flat_layout(tmp_path: Path):
+    (tmp_path / "materials").mkdir()
+    (tmp_path / "diary").mkdir()  # ignored
+    pairs = seed._find_material_dirs(tmp_path)
+    assert pairs == [(tmp_path / "materials", "seed")]
 
 
-def test_parse_course_no_hyphen_returns_none():
-    assert seed._parse_course("notes") is None
+def test_find_material_dirs_nested_layout(tmp_path: Path):
+    (tmp_path / "ML-L3" / "materials").mkdir(parents=True)
+    (tmp_path / "CS-101" / "materials").mkdir(parents=True)
+    (tmp_path / "no-materials-here").mkdir()  # ignored (no materials/ child)
+    pairs = seed._find_material_dirs(tmp_path)
+    pairs_sorted = sorted((d.relative_to(tmp_path), c) for d, c in pairs)
+    assert pairs_sorted == [
+        (Path("CS-101/materials"), "CS-101"),
+        (Path("ML-L3/materials"), "ML-L3"),
+    ]
 
 
-def test_parse_course_leading_digits_returns_none():
-    # Must start with a letter token.
-    assert seed._parse_course("123-abc") is None
+def test_find_material_dirs_mixed_layout(tmp_path: Path):
+    (tmp_path / "materials").mkdir()
+    (tmp_path / "ML-L3" / "materials").mkdir(parents=True)
+    pairs = seed._find_material_dirs(tmp_path)
+    courses = sorted(c for _, c in pairs)
+    assert courses == ["ML-L3", "seed"]
 
 
-# ----- cmd_ingest integration-style tests --------------------------------
+def test_find_material_dirs_skips_hidden(tmp_path: Path):
+    (tmp_path / ".git" / "materials").mkdir(parents=True)
+    (tmp_path / "Real" / "materials").mkdir(parents=True)
+    pairs = seed._find_material_dirs(tmp_path)
+    courses = [c for _, c in pairs]
+    assert courses == ["Real"]
+
+
+# ----- cmd_ingest — flat layout (legacy) ----------------------------------
 
 @pytest.fixture
-def seed_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Build a realistic ingest directory and point the manifest at a tmp location."""
+def flat_seed_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (tmp_path / "diary").mkdir()
     (tmp_path / "materials").mkdir()
     (tmp_path / "diary" / "2026-04-10-wed.md").write_text("wed entry")
     (tmp_path / "diary" / "not-a-date.md").write_text("undated")
-    (tmp_path / "materials" / "ml-l3-transformers.md").write_text("transformers notes")
-    (tmp_path / "materials" / "no-course.md").write_text("misc")
+    (tmp_path / "materials" / "transformers.md").write_text("transformers notes")
+    (tmp_path / "materials" / "study-skills.md").write_text("misc")
 
     monkeypatch.setattr(seed, "MANIFEST", tmp_path / ".state.json")
     return tmp_path
 
 
 @pytest.mark.asyncio
-async def test_cmd_ingest_happy_path(seed_layout: Path, monkeypatch):
+async def test_cmd_ingest_flat_layout(flat_seed_layout: Path, monkeypatch):
     add_diary = AsyncMock()
-    add_material = AsyncMock()
+    add_material_from_file = AsyncMock()
     monkeypatch.setattr(cognee_service, "add_diary_entry", add_diary)
-    monkeypatch.setattr(cognee_service, "add_material", add_material)
+    monkeypatch.setattr(cognee_service, "add_material_from_file", add_material_from_file)
 
-    await seed.cmd_ingest(seed_layout)
+    await seed.cmd_ingest(flat_seed_layout)
 
     assert add_diary.await_count == 2
-    assert add_material.await_count == 2
-    # Verify filename date was parsed for the dated diary file.
+    assert add_material_from_file.await_count == 2
+    # Flat layout → course "seed" for every material.
+    for call in add_material_from_file.await_args_list:
+        assert call.kwargs["course"] == "seed"
+    # Dated diary entry picks up its filename date.
     dated_call = next(
         c for c in add_diary.await_args_list
         if "wed" in c.args[0].text
     )
     assert dated_call.args[0].ts == datetime(2026, 4, 10, 0, 0, tzinfo=UTC)
-    # Verify course prefix extraction on materials.
-    course_call = next(
-        c for c in add_material.await_args_list
-        if "transformers" in c.args[0].text
-    )
-    assert course_call.args[0].course == "ML-L3"
-    # Manifest persisted.
-    assert (seed_layout / ".state.json").exists()
+
+
+# ----- cmd_ingest — course-nested layout (the new corpus) ------------------
+
+@pytest.fixture
+def nested_seed_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Mirrors amin's data/ layout: <root>/<course>/materials/*.pdf
+    (tmp_path / "Analysis_für_Informatik" / "materials").mkdir(parents=True)
+    (tmp_path / "Diskrete_Strukturen" / "materials").mkdir(parents=True)
+    (tmp_path / "Analysis_für_Informatik" / "materials" / "Script_01.pdf").write_bytes(b"%PDF stub 1")
+    (tmp_path / "Analysis_für_Informatik" / "materials" / "Script_02.pdf").write_bytes(b"%PDF stub 2")
+    (tmp_path / "Diskrete_Strukturen" / "materials" / "DS_2023.pdf").write_bytes(b"%PDF stub 3")
+    (tmp_path / "diary").mkdir()  # diary is always flat
+    (tmp_path / "diary" / "2026-04-10-wed.md").write_text("entry")
+
+    monkeypatch.setattr(seed, "MANIFEST", tmp_path / ".state.json")
+    return tmp_path
 
 
 @pytest.mark.asyncio
-async def test_cmd_ingest_rerun_skips_unchanged(seed_layout: Path, monkeypatch):
+async def test_cmd_ingest_nested_layout_with_pdfs(nested_seed_layout: Path, monkeypatch):
     add_diary = AsyncMock()
-    add_material = AsyncMock()
+    add_material_from_file = AsyncMock()
     monkeypatch.setattr(cognee_service, "add_diary_entry", add_diary)
-    monkeypatch.setattr(cognee_service, "add_material", add_material)
+    monkeypatch.setattr(cognee_service, "add_material_from_file", add_material_from_file)
 
-    await seed.cmd_ingest(seed_layout)
-    first_count = add_diary.await_count + add_material.await_count
+    await seed.cmd_ingest(nested_seed_layout)
 
-    await seed.cmd_ingest(seed_layout)
-    # Second run adds nothing — SHA256 matches in manifest.
-    assert add_diary.await_count + add_material.await_count == first_count
+    assert add_material_from_file.await_count == 3
+    assert add_diary.await_count == 1
+
+    # Course label comes from the parent directory name.
+    courses_seen = {c.kwargs["course"] for c in add_material_from_file.await_args_list}
+    assert courses_seen == {"Analysis_für_Informatik", "Diskrete_Strukturen"}
+
+    # PDFs were passed as Path objects (file-path ingest, not tempfile write).
+    for call in add_material_from_file.await_args_list:
+        path = call.args[0]
+        assert isinstance(path, Path)
+        assert path.suffix == ".pdf"
+
+
+# ----- cmd_ingest — resilience --------------------------------------------
+
+@pytest.mark.asyncio
+async def test_cmd_ingest_rerun_skips_unchanged(flat_seed_layout: Path, monkeypatch):
+    add_diary = AsyncMock()
+    add_material_from_file = AsyncMock()
+    monkeypatch.setattr(cognee_service, "add_diary_entry", add_diary)
+    monkeypatch.setattr(cognee_service, "add_material_from_file", add_material_from_file)
+
+    await seed.cmd_ingest(flat_seed_layout)
+    first = add_diary.await_count + add_material_from_file.await_count
+
+    await seed.cmd_ingest(flat_seed_layout)
+    assert add_diary.await_count + add_material_from_file.await_count == first
 
 
 @pytest.mark.asyncio
-async def test_cmd_ingest_continues_past_single_file_error(seed_layout: Path, monkeypatch):
+async def test_cmd_ingest_continues_past_single_file_error(flat_seed_layout: Path, monkeypatch):
     """A failure on one file must not abort the whole run."""
     call_count = 0
 
@@ -111,38 +170,53 @@ async def test_cmd_ingest_continues_past_single_file_error(seed_layout: Path, mo
         if call_count == 1:
             raise RuntimeError("kuzu locked on first call")
 
-    add_material = AsyncMock()
+    add_material_from_file = AsyncMock()
     monkeypatch.setattr(cognee_service, "add_diary_entry", flaky_diary)
-    monkeypatch.setattr(cognee_service, "add_material", add_material)
+    monkeypatch.setattr(cognee_service, "add_material_from_file", add_material_from_file)
 
     with pytest.raises(SystemExit) as excinfo:
-        await seed.cmd_ingest(seed_layout)
-    # Non-zero exit because one file failed.
+        await seed.cmd_ingest(flat_seed_layout)
     assert excinfo.value.code == 1
-    # But the second diary file AND both materials still got through.
     assert call_count == 2  # both diary files attempted
-    assert add_material.await_count == 2
-    # Manifest is persisted despite the failure.
-    assert (seed_layout / ".state.json").exists()
-    manifest = json.loads((seed_layout / ".state.json").read_text())
-    # The successful diary + both materials are recorded; the failed one is not.
+    assert add_material_from_file.await_count == 2
+    manifest = json.loads((flat_seed_layout / ".state.json").read_text())
+    # 1 successful diary + 2 materials recorded; failed diary is not.
     assert len(manifest) == 3
 
 
 @pytest.mark.asyncio
-async def test_cmd_ingest_missing_subdir_warns_but_continues(
+async def test_cmd_ingest_missing_diary_warns_but_continues(
     tmp_path: Path, monkeypatch
 ):
-    """If <root>/diary is missing, ingest the other dataset and continue."""
+    """No diary/ → ingest materials only, no crash."""
     (tmp_path / "materials").mkdir()
     (tmp_path / "materials" / "m.md").write_text("notes")
     monkeypatch.setattr(seed, "MANIFEST", tmp_path / ".state.json")
 
     add_diary = AsyncMock()
-    add_material = AsyncMock()
+    add_material_from_file = AsyncMock()
     monkeypatch.setattr(cognee_service, "add_diary_entry", add_diary)
-    monkeypatch.setattr(cognee_service, "add_material", add_material)
+    monkeypatch.setattr(cognee_service, "add_material_from_file", add_material_from_file)
 
     await seed.cmd_ingest(tmp_path)
     assert add_diary.await_count == 0
-    assert add_material.await_count == 1
+    assert add_material_from_file.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cmd_ingest_no_materials_dir_processes_diary(
+    tmp_path: Path, monkeypatch
+):
+    """No materials/ anywhere → diary still ingests."""
+    (tmp_path / "diary").mkdir()
+    (tmp_path / "diary" / "2026-04-10.md").write_text("entry")
+    monkeypatch.setattr(seed, "MANIFEST", tmp_path / ".state.json")
+
+    add_diary = AsyncMock()
+    add_material_from_file = AsyncMock()
+    monkeypatch.setattr(cognee_service, "add_diary_entry", add_diary)
+    monkeypatch.setattr(cognee_service, "add_material_from_file", add_material_from_file)
+
+    await seed.cmd_ingest(tmp_path)
+    assert add_diary.await_count == 1
+    assert add_material_from_file.await_count == 0

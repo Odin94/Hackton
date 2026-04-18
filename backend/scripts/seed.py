@@ -4,6 +4,20 @@ Usage:
     uv run python -m scripts.seed ingest <dir>
     uv run python -m scripts.seed index
     uv run python -m scripts.seed reset
+
+Layout supported under <dir>:
+
+    # Flat (legacy) — one course worth of materials + diary:
+    <dir>/diary/*.md|.txt
+    <dir>/materials/*.md|.txt|.pdf
+
+    # Course-nested (for the multi-course corpus):
+    <dir>/<course>/materials/*.md|.txt|.pdf
+    <dir>/diary/*.md|.txt                         (diary is never nested)
+
+Each `materials/` directory's parent-folder name becomes `Material.course`
+(flat layout uses `"seed"` as the course label). PDFs are routed through
+cognee's native pypdf loader; .md/.txt go through the text loader.
 """
 import argparse
 import asyncio
@@ -16,10 +30,16 @@ from datetime import UTC, datetime, time
 from pathlib import Path
 
 from app import cognee_service
-from app.types import DiaryEntry, Material
+from app.types import DiaryEntry
 
 _DATE_PREFIX = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
-_COURSE_PREFIX = re.compile(r"^([a-zA-Z]+-[a-zA-Z0-9]+)", re.ASCII)
+
+SUPPORTED_MATERIAL_SUFFIXES = {".md", ".txt", ".pdf"}
+SUPPORTED_DIARY_SUFFIXES = {".md", ".txt"}
+
+log = logging.getLogger("seed")
+
+MANIFEST = Path(__file__).resolve().parent.parent / "seed" / ".state.json"
 
 
 def _parse_diary_date(stem: str) -> datetime | None:
@@ -34,17 +54,6 @@ def _parse_diary_date(stem: str) -> datetime | None:
         return None
 
 
-def _parse_course(stem: str) -> str | None:
-    """Parse leading course token like 'ml-l3' → 'ML-L3'. Returns None if no match."""
-    m = _COURSE_PREFIX.match(stem)
-    return m.group(1).upper() if m else None
-
-log = logging.getLogger("seed")
-
-SUPPORTED_SUFFIXES = {".md", ".txt"}
-MANIFEST = Path(__file__).resolve().parent.parent / "seed" / ".state.json"
-
-
 def _load_manifest() -> dict[str, str]:
     if MANIFEST.exists():
         return json.loads(MANIFEST.read_text())
@@ -56,8 +65,91 @@ def _save_manifest(m: dict[str, str]) -> None:
     MANIFEST.write_text(json.dumps(m, indent=2, sort_keys=True))
 
 
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _find_material_dirs(root: Path) -> list[tuple[Path, str]]:
+    """Discover (materials_dir, course_label) pairs under `root`.
+
+    Supports two layouts:
+    - Flat:          `<root>/materials/`            → course = "seed"
+    - Course-nested: `<root>/<course>/materials/`   → course = <course>
+
+    Hidden dirs (.git, .venv) and the top-level `diary/` are skipped.
+    """
+    pairs: list[tuple[Path, str]] = []
+    flat = root / "materials"
+    if flat.is_dir():
+        pairs.append((flat, "seed"))
+    for sub in sorted(root.iterdir()):
+        if not sub.is_dir() or sub.name.startswith(".") or sub.name in {"materials", "diary"}:
+            continue
+        nested = sub / "materials"
+        if nested.is_dir():
+            pairs.append((nested, sub.name))
+    return pairs
+
+
+async def _ingest_materials(
+    root: Path,
+    manifest: dict[str, str],
+    stats: dict[str, int],
+    failed: list[tuple[str, str]],
+) -> None:
+    for materials_dir, course in _find_material_dirs(root):
+        log.info("[materials] walking %s (course=%s)", materials_dir.relative_to(root), course)
+        for path in sorted(materials_dir.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in SUPPORTED_MATERIAL_SUFFIXES:
+                continue
+            rel = path.relative_to(root)
+            try:
+                digest = _sha256_bytes(path.read_bytes())
+                key = f"materials:{rel}"
+                if manifest.get(key) == digest:
+                    stats["skipped"] += 1
+                    continue
+
+                await cognee_service.add_material_from_file(path, course=course)
+                manifest[key] = digest
+                stats["added"] += 1
+                log.info("[materials] added %s (course=%s)", rel, course)
+            except Exception as e:
+                failed.append((str(rel), f"{type(e).__name__}: {e}"))
+                log.warning("[materials] FAILED %s: %s", rel, e)
+
+
+async def _ingest_diary(
+    root: Path,
+    manifest: dict[str, str],
+    stats: dict[str, int],
+    failed: list[tuple[str, str]],
+) -> None:
+    diary_dir = root / "diary"
+    if not diary_dir.is_dir():
+        log.info("[diary] no %s — skipping", diary_dir)
+        return
+    for path in sorted(diary_dir.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in SUPPORTED_DIARY_SUFFIXES:
+            continue
+        rel = path.relative_to(root)
+        try:
+            text = path.read_text(encoding="utf-8")
+            digest = _sha256_bytes(text.encode("utf-8"))
+            key = f"diary:{rel}"
+            if manifest.get(key) == digest:
+                stats["skipped"] += 1
+                continue
+
+            ts = _parse_diary_date(path.stem)
+            entry = DiaryEntry(text=text) if ts is None else DiaryEntry(text=text, ts=ts)
+            await cognee_service.add_diary_entry(entry)
+            manifest[key] = digest
+            stats["added"] += 1
+            log.info("[diary] added %s", rel)
+        except Exception as e:
+            failed.append((str(rel), f"{type(e).__name__}: {e}"))
+            log.warning("[diary] FAILED %s: %s", rel, e)
 
 
 async def cmd_ingest(root: Path) -> None:
@@ -66,45 +158,18 @@ async def cmd_ingest(root: Path) -> None:
         sys.exit(2)
 
     manifest = _load_manifest()
-    added = 0
-    skipped = 0
-    failed: list[tuple[str, str]] = []  # (path, error-message)
+    stats = {"added": 0, "skipped": 0}
+    failed: list[tuple[str, str]] = []
 
     try:
-        for subdir, dataset in (("diary", "diary"), ("materials", "materials")):
-            ds_root = root / subdir
-            if not ds_root.is_dir():
-                log.info("[%s] no %s — skipping", dataset, ds_root)
-                continue
-            for path in sorted(ds_root.rglob("*")):
-                if not path.is_file() or path.suffix.lower() not in SUPPORTED_SUFFIXES:
-                    continue
-                try:
-                    text = path.read_text(encoding="utf-8")
-                    digest = _sha256(text)
-                    key = f"{dataset}:{path.relative_to(root)}"
-                    if manifest.get(key) == digest:
-                        skipped += 1
-                        continue
-
-                    if dataset == "diary":
-                        ts = _parse_diary_date(path.stem)
-                        entry = DiaryEntry(text=text) if ts is None else DiaryEntry(text=text, ts=ts)
-                        await cognee_service.add_diary_entry(entry)
-                    else:
-                        course = _parse_course(path.stem) or "seed"
-                        await cognee_service.add_material(
-                            Material(text=text, source=path.name, course=course)
-                        )
-                    manifest[key] = digest
-                    added += 1
-                    log.info("[%s] added %s", dataset, path.relative_to(root))
-                except Exception as e:
-                    failed.append((str(path.relative_to(root)), f"{type(e).__name__}: {e}"))
-                    log.warning("[%s] FAILED %s: %s", dataset, path.relative_to(root), e)
+        await _ingest_materials(root, manifest, stats, failed)
+        await _ingest_diary(root, manifest, stats, failed)
     finally:
         _save_manifest(manifest)
-        log.info("summary: added=%d skipped=%d failed=%d", added, skipped, len(failed))
+        log.info(
+            "summary: added=%d skipped=%d failed=%d",
+            stats["added"], stats["skipped"], len(failed),
+        )
         for p, err in failed:
             log.info("  failed: %s → %s", p, err)
         if failed:
@@ -131,7 +196,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="seed")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    ingest = sub.add_parser("ingest", help="add files from <dir>/diary and <dir>/materials")
+    ingest = sub.add_parser(
+        "ingest",
+        help="add files from <dir> (flat or course-nested; see module docstring)",
+    )
     ingest.add_argument("directory", type=Path)
 
     sub.add_parser("index", help="cognify both datasets")

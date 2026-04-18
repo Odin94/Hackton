@@ -182,13 +182,17 @@ def _safe_filename(source: str) -> str:
 
 
 async def add_material(material: Material) -> None:
-    """Ingest a lecture material.
+    """Ingest a lecture material posted as in-memory text (HTTP POST /materials).
 
     Writes the body to a tempdir under `material.source` as the filename,
     then hands cognee the file path — this is the only way to make
     `Document.name` (and therefore `QuizItem.source_ref`) preserve the
     original filename. Passing a raw string makes cognee generate a
     `text_<md5>.txt` name (see `save_data_to_file`), losing provenance.
+
+    For file-backed ingest (the seed CLI's PDF/markdown path), use
+    `add_material_from_file` instead — cheaper (no double-write) and
+    routes PDFs through cognee's native pypdf loader.
     """
     text = _sanitize(material.text)
     body = f"[source={material.source} course={material.course}]\n{text}"
@@ -201,11 +205,40 @@ async def add_material(material: Material) -> None:
         file_path = Path(scratch) / _safe_filename(material.source)
         file_path.write_text(body, encoding="utf-8")
         try:
-            await cognee.add(data=str(file_path), dataset_name="materials")
+            await cognee.add(
+                data=str(file_path),
+                dataset_name="materials",
+                node_set=[material.course],
+            )
         except Exception as e:
             raise _wrap(e) from e
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+async def add_material_from_file(path: Path, course: str) -> None:
+    """Ingest a lecture material from an on-disk file (.pdf, .md, .txt).
+
+    Hands the absolute path directly to cognee.add — cognee picks the right
+    loader (pypdf for .pdf, text for .md/.txt) and preserves the original
+    filename as `Document.name` (so `QuizItem.source_ref` shows the real
+    file). `course` is attached via cognee's `node_set` metadata; downstream
+    GRAPH_COMPLETION searches can filter on it via `node_name=[course]`.
+    """
+    if not path.is_file():
+        raise ValueError(f"not a file: {path}")
+    course = course.strip()
+    if not course:
+        raise ValueError("empty course")
+    log.info("add_material_from_file path=%s course=%s", path.name, course)
+    try:
+        await cognee.add(
+            data=str(path.resolve()),
+            dataset_name="materials",
+            node_set=[course],
+        )
+    except Exception as e:
+        raise _wrap(e) from e
 
 
 async def cognify_dataset(dataset: Dataset) -> None:

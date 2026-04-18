@@ -34,12 +34,15 @@ uv run python -m scripts.seed index           # cognify both datasets (slow: LLM
 uv run python -m scripts.seed reset           # wipe cognee + manifest
 ```
 
-Layout expected under the ingest root:
+Layouts supported under the ingest root:
 
-- `seed/diary/YYYY-MM-DD-anything.md` — dated diary entries. The filename date becomes `DiaryEntry.ts`; missing/invalid dates fall back to `now()`.
-- `seed/materials/<course>-<rest>.md` — lecture materials. The leading `<course>-<rest>` is uppercased into `Material.course` (e.g. `ml-l3-transformers.md` → `ML-L3`).
+- **Flat** (single-course corpus): `<root>/materials/*.{md,txt,pdf}` and `<root>/diary/*.{md,txt}`. Every material is labelled `course="seed"`.
+- **Course-nested** (multi-course corpus): `<root>/<course-name>/materials/*.{md,txt,pdf}`. Each material is labelled with its parent-directory name. Diary is always flat at `<root>/diary/` and never course-scoped.
 
-Supported extensions: `.md`, `.txt`. Per-file errors are logged and do not abort the run; a non-zero exit signals any failures.
+Diary: `.md` / `.txt` only. Filename date (`YYYY-MM-DD-…`) becomes `DiaryEntry.ts`; missing/invalid dates fall back to `now()`.
+Materials: `.md` / `.txt` / `.pdf`. PDFs route through cognee's native pypdf loader (page-by-page text extraction during ingest).
+
+Per-file errors are logged and do not abort the run; a non-zero exit signals any failures.
 
 ## HTTP routes
 
