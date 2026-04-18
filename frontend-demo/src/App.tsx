@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import './App.css'
+import { Badge, GlowDot } from './components/ui'
 import {
   DEMO_USERNAME,
   SCENE_A_PING,
@@ -578,10 +579,11 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
     <aside className="sidebar">
       <div className="sidebar-brand">
         <span className="sidebar-brand-mark">TT</span>
-        <div>
+        <div style={{ flex: 1 }}>
           <p className="eyebrow">TumTum</p>
           <p className="sidebar-brand-sub">Study coach</p>
         </div>
+        <GlowDot color="success" />
       </div>
 
       <SidebarSection title="Focus today">
@@ -661,7 +663,7 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
               <li key={event.id} className="sidebar-item sidebar-item-stack">
                 <div className="sidebar-item-row">
                   <span className="sidebar-item-title">{event.name}</span>
-                  <span className="sidebar-item-tag">{event.type}</span>
+                  <Badge variant="accent">{event.type}</Badge>
                 </div>
                 <div className="sidebar-item-meta">
                   <span className="sidebar-item-course">{event.course_name}</span>
@@ -682,6 +684,7 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
               <li key={deadline.id} className="sidebar-item sidebar-item-stack">
                 <div className="sidebar-item-row">
                   <span className="sidebar-item-title">{deadline.name}</span>
+                  <Badge variant="danger">Due</Badge>
                 </div>
                 <div className="sidebar-item-meta">
                   <span className="sidebar-item-course">{deadline.course_name}</span>
