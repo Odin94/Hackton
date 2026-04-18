@@ -9,6 +9,12 @@ Conventions:
 
 ---
 
+## Iteration 7 — LLM timeout → Settings (87 tests, still passing)
+
+- Moved `_LLM_TIMEOUT_SECONDS` (module constant) to `Settings.llm_call_timeout_seconds`. Env override is `LLM_CALL_TIMEOUT_SECONDS` (deliberately distinct from any cognee-internal `LLM_TIMEOUT` — our timeout caps *our* LiteLLM call only, and mixing the two risks fighting cognee's retry logic).
+- Updated `cognee_service._quiz_llm_call` to read from `settings`, and the test to monkeypatch the setting instead of the module constant.
+- `.env.example` documents the new knob with its default.
+
 ## Iteration 6 — seed resilience + backend README (87 tests)
 
 - **`cmd_ingest` continues past per-file errors.** Previously a single failing `cognee.add` aborted the whole run; now failures are logged, collected, and summarized; the manifest is still saved and the process exits non-zero if anything failed. Successful files still get recorded, so re-runs resume where they left off.
