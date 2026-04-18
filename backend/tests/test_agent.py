@@ -7,7 +7,6 @@ boundary.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,13 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from agent.database import Base
 from agent.db import read_recent, write_entry
-from agent.models import AgentLog, Notification, Quiz, QuizResult, ScheduleEvent, User
+from agent.models import Notification, Quiz, QuizResult, ScheduleEvent, User
 from agent.quiz_workflow import (
     _dispatch_due_notifications_impl,
     _generate_quizzes_impl,
 )
 from app.types import QuizItem
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
