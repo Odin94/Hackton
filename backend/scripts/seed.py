@@ -62,59 +62,68 @@ def _sha256(text: str) -> str:
 
 async def cmd_ingest(root: Path) -> None:
     if not root.is_dir():
-        print(f"error: {root} is not a directory", file=sys.stderr)
+        log.error("%s is not a directory", root)
         sys.exit(2)
 
     manifest = _load_manifest()
     added = 0
     skipped = 0
+    failed: list[tuple[str, str]] = []  # (path, error-message)
 
     try:
         for subdir, dataset in (("diary", "diary"), ("materials", "materials")):
             ds_root = root / subdir
             if not ds_root.is_dir():
-                print(f"[{dataset}] no {ds_root} — skipping")
+                log.info("[%s] no %s — skipping", dataset, ds_root)
                 continue
             for path in sorted(ds_root.rglob("*")):
                 if not path.is_file() or path.suffix.lower() not in SUPPORTED_SUFFIXES:
                     continue
-                text = path.read_text(encoding="utf-8")
-                digest = _sha256(text)
-                key = f"{dataset}:{path.relative_to(root)}"
-                if manifest.get(key) == digest:
-                    skipped += 1
-                    continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                    digest = _sha256(text)
+                    key = f"{dataset}:{path.relative_to(root)}"
+                    if manifest.get(key) == digest:
+                        skipped += 1
+                        continue
 
-                if dataset == "diary":
-                    ts = _parse_diary_date(path.stem)
-                    entry = DiaryEntry(text=text) if ts is None else DiaryEntry(text=text, ts=ts)
-                    await cognee_service.add_diary_entry(entry)
-                else:
-                    course = _parse_course(path.stem) or "seed"
-                    await cognee_service.add_material(
-                        Material(text=text, source=path.name, course=course)
-                    )
-                manifest[key] = digest
-                added += 1
-                print(f"[{dataset}] added {path.relative_to(root)}")
+                    if dataset == "diary":
+                        ts = _parse_diary_date(path.stem)
+                        entry = DiaryEntry(text=text) if ts is None else DiaryEntry(text=text, ts=ts)
+                        await cognee_service.add_diary_entry(entry)
+                    else:
+                        course = _parse_course(path.stem) or "seed"
+                        await cognee_service.add_material(
+                            Material(text=text, source=path.name, course=course)
+                        )
+                    manifest[key] = digest
+                    added += 1
+                    log.info("[%s] added %s", dataset, path.relative_to(root))
+                except Exception as e:
+                    failed.append((str(path.relative_to(root)), f"{type(e).__name__}: {e}"))
+                    log.warning("[%s] FAILED %s: %s", dataset, path.relative_to(root), e)
     finally:
         _save_manifest(manifest)
-        print(f"\nsummary: added={added} skipped={skipped}")
+        log.info("summary: added=%d skipped=%d failed=%d", added, skipped, len(failed))
+        for p, err in failed:
+            log.info("  failed: %s → %s", p, err)
+        if failed:
+            sys.exit(1)
 
 
 async def cmd_index() -> None:
-    print("cognifying diary...")
+    log.info("cognifying diary...")
     await cognee_service.cognify_dataset("diary")
-    print("cognifying materials...")
+    log.info("cognifying materials...")
     await cognee_service.cognify_dataset("materials")
-    print("done")
+    log.info("done")
 
 
 async def cmd_reset() -> None:
     await cognee_service.reset()
     if MANIFEST.exists():
         MANIFEST.unlink()
-    print("reset complete (cognee pruned, manifest removed)")
+    log.info("reset complete (cognee pruned, manifest removed)")
 
 
 def main() -> None:
