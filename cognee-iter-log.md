@@ -9,6 +9,14 @@ Conventions:
 
 ---
 
+## Iteration 5 — response models, LLM timeout, duration logging (83 tests)
+
+- **Response models:** every route declares `response_model=...` (`StatusResp`, `AnswerResp`, `QuizResp`, `IndexStatusResp`). FastAPI's `/docs` now shows the typed envelope; no free-form `dict` anywhere. Wire shape unchanged — fully backward-compatible with the frontend.
+- **LLM timeout:** `_quiz_llm_call` now wraps `litellm.acompletion` in `asyncio.wait_for` with a 30s cap. Timeouts surface as `CogneeServiceError(retryable=True)`, which the retry loop respects. Prevents a stuck provider from wedging the quiz endpoint — demo safety.
+- **Duration logging:** added an `_timed` async context manager; `cognify_dataset`, `_query`, `generate_quiz` all log `label start …` / `label done … elapsed_ms=N` at INFO. Makes the demo's latency budget visible without a metrics stack.
+- **Tests:** +1 for the timeout path (monkeypatches `_LLM_TIMEOUT_SECONDS` to 0.01s; verifies retryable error).
+- Logged deltas 7, 8 in `notes/spec-deltas.md`.
+
 ## Iteration 4 — quiz quality + robustness (82 tests, all passing)
 
 - **Quiz prompt rewritten:** now enumerates grounded-only / question-type diversity / anti-restatement / 1–2 sentence answers / JSON schema rules. Demo-visible quality lift at zero additional cost. Prompt stays small (~200 tokens).

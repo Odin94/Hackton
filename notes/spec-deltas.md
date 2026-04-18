@@ -24,6 +24,20 @@ Format per entry:
 - **Why:** Trivial liveness endpoint — useful for frontend boot checks and for detecting config misconfiguration (since `config.py` raises at import, a responding `/health` proves env is wired).
 - **Status:** proposed — implemented on `cognee/iter`. Spec table not yet amended.
 
+## Delta 7 — LLM timeout + duration logging
+
+- **Section:** §3 service / §6 config / §9 risks.
+- **Change:** `generate_quiz` now wraps `litellm.acompletion` in `asyncio.wait_for` with a 30s default (module constant `_LLM_TIMEOUT_SECONDS`). Timeout raises `CogneeServiceError("LLM call exceeded …", retryable=True)`. Also: `cognify_dataset`, `_query`, and `generate_quiz` are now wrapped in a `_timed` context that emits `elapsed_ms` at INFO.
+- **Why:** Previously a stalled provider could wedge the quiz endpoint indefinitely. Spec §9 row "cognify slow / blocks event loop" implicitly wanted this but didn't codify it. Duration logging helps diagnose slowness in demo without a full metrics stack.
+- **Status:** proposed — implemented on `cognee/iter`. Constant is module-local; could be promoted to `Settings` if the user wants env override.
+
+## Delta 8 — Typed response models on all routes
+
+- **Section:** §4 HTTP routes.
+- **Change:** Each route declares `response_model=...` (`StatusResp`, `AnswerResp`, `QuizResp`, `IndexStatusResp`) so FastAPI's generated OpenAPI schema (`/docs`) shows a typed envelope instead of free-form dict.
+- **Why:** Demo presentation — the frontend gets correctly-typed TS bindings and the `/docs` page looks polished. No behavior change.
+- **Status:** proposed — implemented on `cognee/iter`. Spec table columns still document raw JSON shapes, which remain accurate.
+
 ## Delta 4 — Pydantic bounds on `DiaryEntry` and `Material`
 
 - **Section:** §2 data types.
