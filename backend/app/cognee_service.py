@@ -384,7 +384,25 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
         ]
 
 
+_QUIZ_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "emit_quiz",
+        "description": "Emit the generated quiz items as structured JSON.",
+        "parameters": _QUIZ_SCHEMA,
+    },
+}
+_QUIZ_TOOL_CHOICE = {"type": "function", "function": {"name": "emit_quiz"}}
+
+
 async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
+    """Force structured output via function-calling, not `response_format`.
+
+    LiteLLM has a known bug (BerriAI/litellm#10465) that strips `response_format`
+    on some OpenRouter routes, producing free-form text instead of JSON. The
+    tool-use path is supported on the same providers and doesn't hit that path
+    — cognee itself uses `LLM_INSTRUCTOR_MODE=tool_call` for the same reason.
+    """
     try:
         response = await asyncio.wait_for(
             litellm.acompletion(
@@ -394,16 +412,8 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                extra_body={
-                    "response_format": {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": "quiz",
-                            "strict": True,
-                            "schema": _QUIZ_SCHEMA,
-                        },
-                    }
-                },
+                tools=[_QUIZ_TOOL],
+                tool_choice=_QUIZ_TOOL_CHOICE,
             ),
             timeout=settings.llm_call_timeout_seconds,
         )
@@ -414,13 +424,28 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
     except Exception as e:
         raise _wrap(e) from e
 
-    content = response.choices[0].message.content or ""
+    # Extract arguments from the forced tool call.
+    message = response.choices[0].message
+    tool_calls = getattr(message, "tool_calls", None) or []
+    if not tool_calls:
+        content_preview = (getattr(message, "content", "") or "")[:200]
+        log.warning("quiz LLM did not emit tool call; content=%r", content_preview)
+        raise MalformedLLMResponseError(
+            "quiz generation did not call the emit_quiz tool"
+        )
+
+    # Some LiteLLM backends return already-parsed dicts; accept both.
+    arguments = tool_calls[0].function.arguments
+    arguments_text = arguments if isinstance(arguments, str) else json.dumps(arguments)
+
     try:
-        parsed = json.loads(content)
+        parsed = json.loads(arguments_text)
         items = parsed["items"]
     except (json.JSONDecodeError, KeyError, TypeError) as e:
-        log.warning("quiz JSON parse failed: %s; content=%r", e, content[:200])
-        raise MalformedLLMResponseError("quiz generation returned invalid JSON") from e
+        log.warning("quiz tool arguments parse failed: %s; raw=%r", e, arguments_text[:200])
+        raise MalformedLLMResponseError(
+            "quiz generation returned invalid tool arguments"
+        ) from e
 
     if not isinstance(items, list) or not all(
         isinstance(i, dict) and "question" in i and "answer" in i for i in items

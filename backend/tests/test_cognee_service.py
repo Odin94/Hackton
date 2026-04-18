@@ -21,7 +21,7 @@ from app.cognee_service import (
     UpstreamRateLimitError,
 )
 from app.types import DiaryEntry, Material
-from tests.conftest import llm_response
+from tests.conftest import llm_no_tool_response, llm_response
 
 # ----- _sanitize -----------------------------------------------------------
 
@@ -589,6 +589,75 @@ async def test_generate_quiz_rejects_empty_topic(mock_cognee, mock_litellm):
 async def test_generate_quiz_rejects_zero_n(mock_cognee, mock_litellm):
     with pytest.raises(ValueError):
         await cognee_service.generate_quiz("topic", n=0)
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_surfaces_missing_tool_call_as_malformed(
+    mock_cognee, mock_litellm
+):
+    """If the LLM ignores tool_choice and returns plain content, we raise
+    MalformedLLMResponseError — the retry loop handles it, and after 2 tries
+    we give up (this simulates a model that can't do tool-use for our schema)."""
+    mock_cognee.search.return_value = _chunks_with_source()
+    mock_litellm.side_effect = [
+        llm_no_tool_response("Sorry, I can't do that."),
+        llm_no_tool_response(""),
+    ]
+    with pytest.raises(MalformedLLMResponseError, match="did not call the emit_quiz tool"):
+        await cognee_service.generate_quiz("topic", n=1)
+    assert mock_litellm.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_accepts_pre_parsed_tool_arguments(
+    mock_cognee, mock_litellm
+):
+    """Some LiteLLM backends hand back dict arguments instead of a JSON string.
+    _quiz_llm_call must accept both."""
+    from types import SimpleNamespace
+
+    mock_cognee.search.return_value = _chunks_with_source()
+    pre_parsed = {"items": [{"question": "Q", "answer": "A"}]}
+    mock_litellm.return_value = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_quiz",
+                                arguments=pre_parsed,  # dict, not str
+                            )
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+    items = await cognee_service.generate_quiz("topic", n=1)
+    assert len(items) == 1
+    assert items[0].question == "Q"
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_uses_function_calling_not_response_format(
+    mock_cognee, mock_litellm
+):
+    """Sanity check: verify we pass tools= + tool_choice=, not response_format.
+    This ensures we stay on the path that dodges LiteLLM's response_format bug."""
+    mock_cognee.search.return_value = _chunks_with_source()
+    await cognee_service.generate_quiz("topic", n=1)
+
+    kwargs = mock_litellm.await_args.kwargs
+    assert "tools" in kwargs
+    assert kwargs["tools"][0]["type"] == "function"
+    assert kwargs["tools"][0]["function"]["name"] == "emit_quiz"
+    assert kwargs["tool_choice"]["function"]["name"] == "emit_quiz"
+    # Must NOT be using the problematic response_format path.
+    assert "response_format" not in kwargs
+    assert "extra_body" not in kwargs
 
 
 @pytest.mark.asyncio

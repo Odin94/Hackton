@@ -51,21 +51,51 @@ def mock_cognee(monkeypatch: pytest.MonkeyPatch):
 def mock_litellm(monkeypatch: pytest.MonkeyPatch):
     """Replace litellm.acompletion with a controllable AsyncMock.
 
-    Default return: an object exposing .choices[0].message.content as a JSON string
-    with two items. Tests override the return_value (or side_effect) as needed.
+    Default return: a tool-call response whose arguments encode two quiz items.
+    Tests override return_value (or side_effect) as needed.
+
+    `_quiz_llm_call` now uses function-calling (tool_choice), not response_format,
+    so the mock shape is `message.tool_calls[0].function.arguments` (a JSON string).
     """
-    default_content = '{"items":[{"question":"Q1","answer":"A1"},{"question":"Q2","answer":"A2"}]}'
-    acompletion = AsyncMock(
-        return_value=SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=default_content))]
-        )
-    )
+    default_args = '{"items":[{"question":"Q1","answer":"A1"},{"question":"Q2","answer":"A2"}]}'
+    acompletion = AsyncMock(return_value=_build_tool_response(default_args))
     monkeypatch.setattr(cognee_service.litellm, "acompletion", acompletion)
     return acompletion
 
 
-def llm_response(content: str) -> SimpleNamespace:
-    """Build the litellm response object tests hand back via return_value/side_effect."""
+def _build_tool_response(arguments: str) -> SimpleNamespace:
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_quiz",
+                                arguments=arguments,
+                            )
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+
+def llm_response(arguments: str) -> SimpleNamespace:
+    """Build a litellm tool-call response where `arguments` is the JSON string
+    the mock emits as the `emit_quiz` tool call payload."""
+    return _build_tool_response(arguments)
+
+
+def llm_no_tool_response(content: str = "") -> SimpleNamespace:
+    """Build a response where the LLM refused the tool — content only, no tool_calls.
+    Simulates a model that won't honor tool_choice (should surface as MalformedLLMResponseError)."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content, tool_calls=None)
+            )
+        ]
     )
