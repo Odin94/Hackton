@@ -9,6 +9,16 @@ Conventions:
 
 ---
 
+## Status snapshot
+
+- **Tests:** 88 passing (`uv run pytest`, <1s, fully mocked — no network).
+- **Lint:** `uv run ruff check` clean.
+- **Diff vs main:** ~1600 lines added across app/scripts/tests/docs; no main-branch files touched.
+- **Still untested live:** cognee cognify + quiz against a real LLM — plug an OpenRouter key into `backend/.env` and run `uv run python -m scripts.seed index` followed by `curl localhost:8000/quiz ...` to exercise the full path. Spec §10 acceptance cannot be ticked off until then.
+- **Open spec deltas:** 8 queued in `notes/spec-deltas.md` — none applied to the spec file itself, awaiting review.
+
+---
+
 ## Iteration 10 — ruff lint gate (88 tests, 0 lint issues)
 
 - Added `ruff>=0.6` to dev deps and a minimal `[tool.ruff]` config in `pyproject.toml`: line length 100, target py312, rules `E F I UP B SIM`, ignores `E501`/`B008`/`SIM117` as situational false-positives.
