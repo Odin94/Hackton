@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     # LLM_TIMEOUT env var — kept separate so a change here can't fight cognee's
     # own retry/timeout machinery.
     llm_call_timeout_seconds: float = 30.0
+    disable_scheduler: bool = False
+    current_date_override: str | None = None
 
 
 settings = Settings()

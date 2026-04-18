@@ -616,7 +616,15 @@ async def test_generate_quiz_truncates_over_n(mock_cognee, mock_litellm):
     mock_cognee.search.return_value = _chunks_with_source()
     # LLM returns 4 items, request asked for 2 — truncate.
     mock_litellm.return_value = llm_response(json.dumps({
-        "items": [{"question": f"Q{i}", "answer": f"A{i}"} for i in range(4)]
+        "items": [
+            {
+                "question": f"Q{i}",
+                "answer": f"A{i}",
+                "options": [f"A{i}", "w1", "w2", "w3"],
+                "correct_index": 0,
+            }
+            for i in range(4)
+        ]
     }))
     items = await cognee_service.generate_quiz("topic", n=2)
     assert len(items) == 2
@@ -627,7 +635,12 @@ async def test_generate_quiz_truncates_over_n(mock_cognee, mock_litellm):
 async def test_generate_quiz_accepts_under_n_with_warning(mock_cognee, mock_litellm, caplog):
     mock_cognee.search.return_value = _chunks_with_source()
     mock_litellm.return_value = llm_response(json.dumps({
-        "items": [{"question": "Q0", "answer": "A0"}]
+        "items": [{
+            "question": "Q0",
+            "answer": "A0",
+            "options": ["A0", "w1", "w2", "w3"],
+            "correct_index": 0,
+        }]
     }))
     with caplog.at_level("WARNING"):
         items = await cognee_service.generate_quiz("topic", n=5)
@@ -640,7 +653,14 @@ async def test_generate_quiz_retries_once_on_bad_json(mock_cognee, mock_litellm)
     mock_cognee.search.return_value = _chunks_with_source()
     mock_litellm.side_effect = [
         llm_response("not json at all"),
-        llm_response(json.dumps({"items": [{"question": "Q", "answer": "A"}]})),
+        llm_response(json.dumps({
+            "items": [{
+                "question": "Q",
+                "answer": "A",
+                "options": ["A", "w1", "w2", "w3"],
+                "correct_index": 0,
+            }]
+        })),
     ]
     items = await cognee_service.generate_quiz("topic", n=1)
     assert len(items) == 1
@@ -666,7 +686,14 @@ async def test_generate_quiz_retries_on_malformed_items_shape(mock_cognee, mock_
     mock_cognee.search.return_value = _chunks_with_source()
     mock_litellm.side_effect = [
         llm_response(json.dumps({"items": [{"question": "Q"}]})),  # missing answer
-        llm_response(json.dumps({"items": [{"question": "Q", "answer": "A"}]})),
+        llm_response(json.dumps({
+            "items": [{
+                "question": "Q",
+                "answer": "A",
+                "options": ["A", "w1", "w2", "w3"],
+                "correct_index": 0,
+            }]
+        })),
     ]
     items = await cognee_service.generate_quiz("topic", n=1)
     assert len(items) == 1
@@ -712,7 +739,12 @@ async def test_generate_quiz_accepts_pre_parsed_tool_arguments(
     from types import SimpleNamespace
 
     mock_cognee.search.return_value = _chunks_with_source()
-    pre_parsed = {"items": [{"question": "Q", "answer": "A"}]}
+    pre_parsed = {"items": [{
+        "question": "Q",
+        "answer": "A",
+        "options": ["A", "w1", "w2", "w3"],
+        "correct_index": 0,
+    }]}
     mock_litellm.return_value = SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -765,7 +797,12 @@ async def test_generate_quiz_llm_timeout_surfaces_as_retryable(
 
     async def slow(*args, **kwargs):
         await asyncio.sleep(0.5)
-        return llm_response(json.dumps({"items": [{"question": "Q", "answer": "A"}]}))
+        return llm_response(json.dumps({"items": [{
+            "question": "Q",
+            "answer": "A",
+            "options": ["A", "w1", "w2", "w3"],
+            "correct_index": 0,
+        }]}))
 
     mock_litellm.side_effect = slow
 

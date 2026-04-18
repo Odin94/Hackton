@@ -35,7 +35,14 @@ def mock_service(monkeypatch: pytest.MonkeyPatch):
         "query_diary": AsyncMock(return_value="diary answer"),
         "query_materials": AsyncMock(return_value="materials answer"),
         "generate_quiz": AsyncMock(return_value=[
-            QuizItem(question="Q", answer="A", topic="t", source_ref="src.md")
+            QuizItem(
+                question="Q",
+                answer="A",
+                options=["A", "w1", "w2", "w3"],
+                correct_index=0,
+                topic="t",
+                source_ref="src.md",
+            )
         ]),
     }
     for name, mock in mocks.items():

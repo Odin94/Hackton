@@ -57,7 +57,12 @@ def mock_litellm(monkeypatch: pytest.MonkeyPatch):
     `_quiz_llm_call` now uses function-calling (tool_choice), not response_format,
     so the mock shape is `message.tool_calls[0].function.arguments` (a JSON string).
     """
-    default_args = '{"items":[{"question":"Q1","answer":"A1"},{"question":"Q2","answer":"A2"}]}'
+    default_args = (
+        '{"items":['
+        '{"question":"Q1","answer":"A1","options":["A1","B1","C1","D1"],"correct_index":0},'
+        '{"question":"Q2","answer":"A2","options":["A2","B2","C2","D2"],"correct_index":0}'
+        ']}'
+    )
     acompletion = AsyncMock(return_value=_build_tool_response(default_args))
     monkeypatch.setattr(cognee_service.litellm, "acompletion", acompletion)
     return acompletion
