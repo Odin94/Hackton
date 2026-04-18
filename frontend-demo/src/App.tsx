@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import './App.css'
 import {
@@ -96,6 +96,7 @@ function App() {
   const [overview, setOverview] = useState<OverviewResp | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
   const quizDoneResolverRef = useRef<(() => void) | null>(null)
+  const socketRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
     if (token) {
@@ -127,32 +128,27 @@ function App() {
     setStatus(`Ready as ${DEMO_USERNAME} — press Play to run the demo.`)
   }, [token])
 
-  useEffect(() => {
+  const refreshOverview = useCallback(async () => {
     if (!token) {
       return
     }
-    let cancelled = false
-    async function loadOverview() {
-      try {
-        const response = await fetch('/demo/overview', {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        if (!response.ok) {
-          throw new Error(`overview ${response.status}`)
-        }
-        const body = (await response.json()) as OverviewResp
-        if (!cancelled) {
-          setOverview(body)
-        }
-      } catch {
-        // Sidebar is best-effort; silent fail keeps demo flow clean.
+    try {
+      const response = await fetch('/demo/overview', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) {
+        throw new Error(`overview ${response.status}`)
       }
+      const body = (await response.json()) as OverviewResp
+      setOverview(body)
+    } catch {
+      // Sidebar is best-effort; silent fail keeps demo flow clean.
     }
-    void loadOverview()
-    return () => {
-      cancelled = true
-    }
-  }, [token, messages.length])
+  }, [token])
+
+  useEffect(() => {
+    void refreshOverview()
+  }, [refreshOverview])
 
   useEffect(() => {
     const list = listRef.current
@@ -169,6 +165,7 @@ function App() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const socketUrl = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
     const socket = new WebSocket(socketUrl)
+    socketRef.current = socket
 
     socket.addEventListener('message', (event) => {
       const payload = JSON.parse(event.data) as ChatSocketPayload
@@ -190,8 +187,32 @@ function App() {
 
     return () => {
       socket.close()
+      if (socketRef.current === socket) {
+        socketRef.current = null
+      }
     }
   }, [token])
+
+  async function waitForSocketOpen(timeoutMs = 1500) {
+    const socket = socketRef.current
+    if (!socket) {
+      return
+    }
+    if (socket.readyState === WebSocket.OPEN) {
+      return
+    }
+    await new Promise<void>((resolve) => {
+      const onOpen = () => {
+        socket.removeEventListener('open', onOpen)
+        resolve()
+      }
+      socket.addEventListener('open', onOpen)
+      setTimeout(() => {
+        socket.removeEventListener('open', onOpen)
+        resolve()
+      }, timeoutMs)
+    })
+  }
 
   async function postJSON(url: string, body: unknown) {
     if (!token) {
@@ -252,6 +273,7 @@ function App() {
     }
     setIsAutoRunning(true)
     try {
+      await waitForSocketOpen()
       setStatus('Scene A — TumTum proactive ping')
       await sendSystemMessage(SCENE_A_PING)
       await sleep(3500)
@@ -360,31 +382,36 @@ function App() {
     }
   }
 
-  async function handleQuizComplete(answers: number[]) {
-    setQuizOpen(false)
-    setQuizAutoPlay(false)
-    const correctCount = answers.reduce(
-      (acc, choice, idx) => acc + (choice === FALLBACK_QUIZ.questions[idx].correct_index ? 1 : 0),
-      0,
-    )
-    try {
-      await saveQuizResults(correctCount, answers.length)
-      setStatus(`Quiz saved: ${correctCount}/${answers.length}`)
-    } catch (err) {
-      setStatus(`Quiz save failed: ${toMessage(err)}`)
-    }
-    await sleep(700)
-    try {
-      await sendSystemMessage(
-        `${SCENE_E_RECAP_PREFIX}${correctCount}/${answers.length} on the powerset drill.${SCENE_E_RECAP_BODY}`,
+  const handleQuizComplete = useCallback(
+    async (answers: number[]) => {
+      setQuizOpen(false)
+      setQuizAutoPlay(false)
+      const correctCount = answers.reduce(
+        (acc, choice, idx) =>
+          acc + (choice === FALLBACK_QUIZ.questions[idx].correct_index ? 1 : 0),
+        0,
       )
-    } catch (err) {
-      setStatus(`Scene E recap failed: ${toMessage(err)}`)
-    }
-    const resolver = quizDoneResolverRef.current
-    quizDoneResolverRef.current = null
-    resolver?.()
-  }
+      try {
+        await saveQuizResults(correctCount, answers.length)
+        setStatus(`Quiz saved: ${correctCount}/${answers.length}`)
+        void refreshOverview()
+      } catch (err) {
+        setStatus(`Quiz save failed: ${toMessage(err)}`)
+      }
+      await sleep(700)
+      try {
+        await sendSystemMessage(
+          `${SCENE_E_RECAP_PREFIX}${correctCount}/${answers.length} on the powerset drill.${SCENE_E_RECAP_BODY}`,
+        )
+      } catch (err) {
+        setStatus(`Scene E recap failed: ${toMessage(err)}`)
+      }
+      const resolver = quizDoneResolverRef.current
+      quizDoneResolverRef.current = null
+      resolver?.()
+    },
+    [token, refreshOverview],
+  )
 
   return (
     <div className="app-shell">
