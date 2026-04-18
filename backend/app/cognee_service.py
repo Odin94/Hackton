@@ -32,11 +32,18 @@ def _sanitize(text: str) -> str:
     return cleaned
 
 
+_RETRYABLE_CLASSES: tuple[type[BaseException], ...] = (
+    asyncio.TimeoutError,
+    TimeoutError,
+    ConnectionError,
+)
+_RETRYABLE_MARKERS = ("timeout", "timed out", "rate limit", "429", "503", "502")
+
+
 def _wrap(exc: Exception) -> CogneeServiceError:
     msg = f"{type(exc).__name__}: {exc}"
-    retryable = any(
-        marker in msg.lower()
-        for marker in ("timeout", "timed out", "rate limit", "429", "503", "502")
+    retryable = isinstance(exc, _RETRYABLE_CLASSES) or any(
+        marker in msg.lower() for marker in _RETRYABLE_MARKERS
     )
     return CogneeServiceError(msg, retryable=retryable)
 
@@ -172,6 +179,40 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
     )
     user_prompt = f"Topic: {topic}\n\nContext:\n{context_text}"
 
+    raw_items = await _quiz_llm_call_with_retry(system_prompt, user_prompt)
+
+    if len(raw_items) > n:
+        raw_items = raw_items[:n]
+    elif len(raw_items) < n:
+        log.warning("quiz returned %d items, expected %d", len(raw_items), n)
+
+    return [
+        QuizItem(
+            question=str(item["question"]),
+            answer=str(item["answer"]),
+            topic=topic,
+            source_ref=source_ref,
+        )
+        for item in raw_items
+    ]
+
+
+async def _quiz_llm_call_with_retry(system_prompt: str, user_prompt: str) -> list[dict]:
+    """One-shot retry on malformed JSON — spec §9 risk mitigation."""
+    last_exc: CogneeServiceError | None = None
+    for attempt in (1, 2):
+        try:
+            return await _quiz_llm_call(system_prompt, user_prompt)
+        except CogneeServiceError as e:
+            if not e.retryable or attempt == 2:
+                raise
+            log.info("quiz retry after retryable error: %s", e)
+            last_exc = e
+    # Unreachable, but keeps type-checker happy.
+    raise last_exc  # type: ignore[misc]
+
+
+async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
     try:
         response = await litellm.acompletion(
             model=settings.llm_model,
@@ -197,19 +238,18 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
     content = response.choices[0].message.content or ""
     try:
         parsed = json.loads(content)
-        raw_items = parsed["items"]
+        items = parsed["items"]
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         log.warning("quiz JSON parse failed: %s; content=%r", e, content[:200])
         raise CogneeServiceError(
             "quiz generation returned invalid JSON", retryable=True
         ) from e
 
-    return [
-        QuizItem(
-            question=str(item["question"]),
-            answer=str(item["answer"]),
-            topic=topic,
-            source_ref=source_ref,
+    if not isinstance(items, list) or not all(
+        isinstance(i, dict) and "question" in i and "answer" in i for i in items
+    ):
+        log.warning("quiz items malformed: %r", str(items)[:200])
+        raise CogneeServiceError(
+            "quiz generation returned malformed items", retryable=True
         )
-        for item in raw_items
-    ]
+    return items
