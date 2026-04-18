@@ -253,7 +253,7 @@ def main() -> None:
         nargs="+",
         metavar="COURSE",
         default=[],
-        help="course directory names to skip (e.g. Einführung_in_die_Rechnerarchitektur)",
+        help="course directory names to skip (e.g. Analysis_für_Informatik)",
     )
 
     sync = sub.add_parser(
@@ -276,7 +276,7 @@ def main() -> None:
         nargs="+",
         metavar="COURSE",
         default=[],
-        help="course directory names to skip (e.g. Einführung_in_die_Rechnerarchitektur)",
+        help="course directory names to skip (e.g. Analysis_für_Informatik)",
     )
 
     sub.add_parser("index", help="cognify both datasets")

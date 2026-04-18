@@ -510,8 +510,6 @@ def _demo_quiz_topic_for_course(course_name: str) -> str:
     lowered = course_name.casefold()
     if "machine learning" in lowered or lowered == "ml":
         return "transformers"
-    if "rechnerarchitektur" in lowered:
-        return "assembler"
     return course_name
 
 
