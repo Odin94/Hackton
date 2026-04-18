@@ -9,6 +9,12 @@ Conventions:
 
 ---
 
+## Iteration 8 — guard empty-text chunks (88 tests)
+
+- `generate_quiz` now raises `CogneeServiceError("…had no text content", retryable=True)` when `chunks` is non-empty but every chunk has blank text. Previously we'd have sent the LLM an empty context and let it hallucinate freely.
+- Retryable flag is set because the vector index might be mid-write; a second attempt may pick up freshly-indexed chunks with text.
+- Added test for the edge case.
+
 ## Iteration 7 — LLM timeout → Settings (87 tests, still passing)
 
 - Moved `_LLM_TIMEOUT_SECONDS` (module constant) to `Settings.llm_call_timeout_seconds`. Env override is `LLM_CALL_TIMEOUT_SECONDS` (deliberately distinct from any cognee-internal `LLM_TIMEOUT` — our timeout caps *our* LiteLLM call only, and mixing the two risks fighting cognee's retry logic).

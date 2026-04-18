@@ -293,6 +293,16 @@ async def test_generate_quiz_empty_chunks_raises(mock_cognee, mock_litellm):
 
 
 @pytest.mark.asyncio
+async def test_generate_quiz_all_textless_chunks_raises(mock_cognee, mock_litellm):
+    """Non-empty chunks list where every chunk has blank text → don't call LLM."""
+    mock_cognee.search.return_value = [{"text": ""}, {"text": "   "}, {}]
+    with pytest.raises(CogneeServiceError, match="no text content") as excinfo:
+        await cognee_service.generate_quiz("topic", n=2)
+    assert excinfo.value.retryable is True
+    mock_litellm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_generate_quiz_normalizes_single_dict_chunk(mock_cognee, mock_litellm):
     """cognee v1 sometimes returns a single dict instead of [dict] — spec §9."""
     mock_cognee.search.return_value = {

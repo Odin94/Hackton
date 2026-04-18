@@ -219,6 +219,12 @@ async def _generate_quiz_inner(topic: str, n: int) -> list[QuizItem]:
     context_text = "\n\n---\n\n".join(
         str(_chunk_text(c)) for c in chunks if _chunk_text(c)
     )
+    if not context_text.strip():
+        # All chunks returned empty text — proceeding would let the LLM hallucinate
+        # freely. Surface as retryable in case the vector index is mid-write.
+        raise CogneeServiceError(
+            f"chunks for topic '{topic}' had no text content", retryable=True
+        )
     source_ref = _extract_source_ref(chunks[0])
 
     system_prompt = (
