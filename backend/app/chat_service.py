@@ -25,7 +25,6 @@ from agent.models import (
     User,
 )
 from app import cognee_service
-from app.cognee_service import CogneeServiceError, NoDataError
 from app.config import settings
 
 log = logging.getLogger(__name__)
@@ -1183,35 +1182,12 @@ async def _build_sqlite_context(session: AsyncSession, user_id: int) -> str:
 
 async def _build_cognee_context(query: str) -> str:
     log.debug("chat._build_cognee_context start query_len=%d preview=%r", len(query), _preview(query))
-    diary_task = asyncio.create_task(_safe_query(cognee_service.query_diary, query))
-    materials_task = asyncio.create_task(_safe_query(cognee_service.query_materials, query))
-    diary_answer, materials_answer = await asyncio.gather(diary_task, materials_task)
-    combined = (
-        "Diary retrieval:\n"
-        f"{diary_answer}\n\n"
-        "Materials retrieval:\n"
-        f"{materials_answer}"
+    combined = await cognee_service.query_combined_context(
+        diary_query=query,
+        materials_query=query,
     )
     log.debug(
-        "chat._build_cognee_context done diary_len=%d materials_len=%d total_len=%d",
-        len(diary_answer),
-        len(materials_answer),
+        "chat._build_cognee_context done total_len=%d",
         len(combined),
     )
     return combined
-
-
-async def _safe_query(fn, query: str) -> str:
-    fn_name = getattr(fn, "__name__", repr(fn))
-    log.debug("chat._safe_query start fn=%s query_preview=%r", fn_name, _preview(query))
-    try:
-        answer = await fn(query)
-    except NoDataError:
-        log.debug("chat._safe_query no_data fn=%s", fn_name)
-        return "No relevant context found."
-    except CogneeServiceError as e:
-        log.warning("chat._safe_query cognee_error fn=%s query_preview=%r error=%s", fn_name, _preview(query), e)
-        return f"Retrieval unavailable: {e}"
-    cleaned = answer.strip() or "No relevant context found."
-    log.debug("chat._safe_query done fn=%s answer_len=%d answer_preview=%r", fn_name, len(cleaned), _preview(cleaned))
-    return cleaned

@@ -160,6 +160,39 @@ async def test_cmd_ingest_rerun_skips_unchanged(flat_seed_layout: Path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_cmd_sync_skips_index_when_nothing_changed(flat_seed_layout: Path, monkeypatch):
+    add_diary = AsyncMock()
+    add_material_from_file = AsyncMock()
+    cognify_dataset = AsyncMock()
+    monkeypatch.setattr(cognee_service, "add_diary_entry", add_diary)
+    monkeypatch.setattr(cognee_service, "add_material_from_file", add_material_from_file)
+    monkeypatch.setattr(cognee_service, "cognify_dataset", cognify_dataset)
+
+    await seed.cmd_sync(flat_seed_layout)
+    assert cognify_dataset.await_count == 2
+
+    await seed.cmd_sync(flat_seed_layout)
+    assert cognify_dataset.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cmd_sync_fresh_resets_before_ingest(flat_seed_layout: Path, monkeypatch):
+    reset = AsyncMock()
+    add_diary = AsyncMock()
+    add_material_from_file = AsyncMock()
+    cognify_dataset = AsyncMock()
+    monkeypatch.setattr(seed, "cmd_reset", reset)
+    monkeypatch.setattr(cognee_service, "add_diary_entry", add_diary)
+    monkeypatch.setattr(cognee_service, "add_material_from_file", add_material_from_file)
+    monkeypatch.setattr(cognee_service, "cognify_dataset", cognify_dataset)
+
+    await seed.cmd_sync(flat_seed_layout, fresh=True)
+
+    reset.assert_awaited_once()
+    assert cognify_dataset.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_cmd_ingest_continues_past_single_file_error(flat_seed_layout: Path, monkeypatch):
     """A failure on one file must not abort the whole run."""
     call_count = 0

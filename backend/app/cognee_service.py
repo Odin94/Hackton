@@ -326,6 +326,40 @@ async def query_materials(q: str) -> str:
     return await _query("materials", q)
 
 
+async def _query_for_combined_context(fn, query: str) -> str:
+    try:
+        answer = await fn(query)
+    except NoDataError:
+        return "No relevant context found."
+    except CogneeServiceError as exc:
+        return f"Retrieval unavailable: {exc}"
+    return answer.strip() or "No relevant context found."
+
+
+async def query_combined_context(
+    *,
+    diary_query: str,
+    materials_query: str | None = None,
+) -> str:
+    """Fetch demo-ready context from both shared Cognee datasets.
+
+    The seed corpus is global rather than user-scoped, so callers can use this
+    for any app user and still surface the available diary/material knowledge.
+    """
+    materials_query = diary_query if materials_query is None else materials_query
+    diary_task = asyncio.create_task(_query_for_combined_context(query_diary, diary_query))
+    materials_task = asyncio.create_task(
+        _query_for_combined_context(query_materials, materials_query)
+    )
+    diary_answer, materials_answer = await asyncio.gather(diary_task, materials_task)
+    return (
+        "Diary retrieval:\n"
+        f"{diary_answer}\n\n"
+        "Materials retrieval:\n"
+        f"{materials_answer}"
+    )
+
+
 def index_status() -> dict[str, Literal["idle", "indexing"]]:
     return dict(_state)
 

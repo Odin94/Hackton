@@ -350,14 +350,31 @@ def test_build_llm_user_prompt_includes_diary_and_sqlite_context():
     prompt = _build_llm_user_prompt(
         user_id=7,
         sqlite_context="Upcoming schedule events:\n- lecture: ML",
-        diary_context="The student focuses better after a morning run.",
+        cognee_context=(
+            "Diary retrieval:\nThe student focuses better after a morning run.\n\n"
+            "Materials retrieval:\nTransformers use attention."
+        ),
         recent=[{"created_at": "2026-04-18T10:00:00+00:00", "entry_type": "study_pattern", "content": "Exercise seems to help focus."}],
     )
 
     assert "user 7" in prompt
     assert "morning run" in prompt
+    assert "Transformers use attention" in prompt
     assert "Upcoming schedule events" in prompt
     assert "study_pattern" in prompt
+
+
+async def test_build_scheduler_cognee_context_uses_combined_seeded_data():
+    expected = "Diary retrieval:\nHabits\n\nMaterials retrieval:\nTopics"
+    with patch("agent.scheduler.query_combined_context", new=AsyncMock(return_value=expected)) as mock_query:
+        from agent.scheduler import _build_scheduler_cognee_context
+
+        context = await _build_scheduler_cognee_context()
+
+    assert context == expected
+    kwargs = mock_query.await_args.kwargs
+    assert "study habits" in kwargs["diary_query"]
+    assert "course materials" in kwargs["materials_query"]
 
 
 # ---------------------------------------------------------------------------

@@ -24,8 +24,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from pathlib import Path
 
@@ -40,6 +42,13 @@ SUPPORTED_DIARY_SUFFIXES = {".md", ".txt"}
 log = logging.getLogger("seed")
 
 MANIFEST = Path(__file__).resolve().parent.parent / "seed" / ".state.json"
+
+
+@dataclass(frozen=True)
+class SeedSummary:
+    added: int
+    skipped: int
+    failed: int
 
 
 def _parse_diary_date(stem: str) -> datetime | None:
@@ -160,7 +169,7 @@ async def _ingest_diary(
             log.warning("[diary] FAILED %s: %s", rel, e)
 
 
-async def cmd_ingest(root: Path, skip_courses: set[str] | None = None) -> None:
+async def cmd_ingest(root: Path, skip_courses: set[str] | None = None) -> SeedSummary:
     if not root.is_dir():
         log.error("%s is not a directory", root)
         sys.exit(2)
@@ -173,15 +182,21 @@ async def cmd_ingest(root: Path, skip_courses: set[str] | None = None) -> None:
         await _ingest_materials(root, manifest, stats, failed, skip_courses)
         await _ingest_diary(root, manifest, stats, failed)
     finally:
+        summary = SeedSummary(
+            added=stats["added"],
+            skipped=stats["skipped"],
+            failed=len(failed),
+        )
         _save_manifest(manifest)
         log.info(
             "summary: added=%d skipped=%d failed=%d",
-            stats["added"], stats["skipped"], len(failed),
+            summary.added, summary.skipped, summary.failed,
         )
         for p, err in failed:
             log.info("  failed: %s → %s", p, err)
         if failed:
             sys.exit(1)
+    return summary
 
 
 async def cmd_index() -> None:
@@ -190,6 +205,30 @@ async def cmd_index() -> None:
     log.info("cognifying materials...")
     await cognee_service.cognify_dataset("materials")
     log.info("done")
+
+
+async def cmd_sync(
+    root: Path,
+    *,
+    skip_courses: set[str] | None = None,
+    fresh: bool = False,
+    skip_index: bool = False,
+) -> SeedSummary:
+    if fresh:
+        log.info("fresh sync requested; resetting cognee state first")
+        await cmd_reset()
+
+    summary = await cmd_ingest(root, skip_courses=skip_courses)
+    if skip_index:
+        log.info("skip-index requested; leaving cognify step untouched")
+        return summary
+
+    if summary.added == 0:
+        log.info("no new or changed files detected; skipping cognify")
+        return summary
+
+    await cmd_index()
+    return summary
 
 
 async def cmd_reset() -> None:
@@ -217,17 +256,59 @@ def main() -> None:
         help="course directory names to skip (e.g. Einführung_in_die_Rechnerarchitektur)",
     )
 
+    sync = sub.add_parser(
+        "sync",
+        help="incrementally ingest files from <dir> and cognify only when something changed",
+    )
+    sync.add_argument("directory", type=Path)
+    sync.add_argument(
+        "--fresh",
+        action="store_true",
+        help="wipe cognee + manifest before ingesting",
+    )
+    sync.add_argument(
+        "--skip-index",
+        action="store_true",
+        help="ingest only; do not run cognify afterwards",
+    )
+    sync.add_argument(
+        "--skip-courses",
+        nargs="+",
+        metavar="COURSE",
+        default=[],
+        help="course directory names to skip (e.g. Einführung_in_die_Rechnerarchitektur)",
+    )
+
     sub.add_parser("index", help="cognify both datasets")
     sub.add_parser("reset", help="wipe cognee + manifest")
 
     args = parser.parse_args()
+    debug = os.getenv("SEED_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 
-    if args.cmd == "ingest":
-        asyncio.run(cmd_ingest(args.directory, skip_courses=set(args.skip_courses)))
-    elif args.cmd == "index":
-        asyncio.run(cmd_index())
-    elif args.cmd == "reset":
-        asyncio.run(cmd_reset())
+    try:
+        if args.cmd == "ingest":
+            asyncio.run(cmd_ingest(args.directory, skip_courses=set(args.skip_courses)))
+        elif args.cmd == "sync":
+            asyncio.run(
+                cmd_sync(
+                    args.directory,
+                    skip_courses=set(args.skip_courses),
+                    fresh=args.fresh,
+                    skip_index=args.skip_index,
+                )
+            )
+        elif args.cmd == "index":
+            asyncio.run(cmd_index())
+        elif args.cmd == "reset":
+            asyncio.run(cmd_reset())
+    except SystemExit:
+        raise
+    except Exception as exc:
+        if debug:
+            raise
+        log.error("seed failed: %s", exc)
+        log.info("set SEED_DEBUG=1 to see the full traceback")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

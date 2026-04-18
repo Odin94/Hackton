@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from app.cognee_service import CogneeServiceError, NoDataError, query_diary
+from app.cognee_service import query_combined_context
 
 from .database import AsyncSessionLocal
 from .db import list_user_ids, read_recent
@@ -42,14 +42,14 @@ NOTIFICATION_DISPATCH_INTERVAL = 60  # 1 minute
 _LLM_SYSTEM_PROMPT = """\
 You are StudyBot's autonomous study coach. You run in the background and help a
 student make better study decisions, stay ahead of deadlines, and reinforce
-healthy habits discovered from their diary.
+healthy habits discovered from their diary and available course materials.
 
 You have access to two tools:
 - write_to_db: persist durable insights, patterns, or concerns for later use.
 - schedule_notification: queue a proactive chat notification for the user.
 
 Rules:
-- Use ONLY the supplied diary retrieval, SQLite app state, and recent agent-log entries.
+- Use ONLY the supplied Cognee retrieval, SQLite app state, and recent agent-log entries.
 - Prefer concrete, timely interventions over generic encouragement.
 - Good notifications are short and actionable: reminder before an event, recovery
   nudge after slipping, habit advice grounded in diary evidence, or a prompt to
@@ -62,7 +62,7 @@ def _build_llm_user_prompt(
     *,
     user_id: int,
     sqlite_context: str,
-    diary_context: str,
+    cognee_context: str,
     recent: list[dict],
 ) -> str:
     if recent:
@@ -78,7 +78,7 @@ def _build_llm_user_prompt(
         f"It's your scheduled hourly check-in for user {user_id}.\n\n"
         f"Current UTC time: {datetime.now(UTC).isoformat()}\n\n"
         f"SQLite application context:\n{sqlite_context}\n\n"
-        f"Diary retrieval:\n{diary_context}\n\n"
+        f"Cognee context:\n{cognee_context}\n\n"
         f"Recent agent-log entries:\n{context}\n\n"
         "Decide whether there is anything worth doing right now:\n"
         "- store a durable study insight,\n"
@@ -231,20 +231,19 @@ async def _build_scheduler_sqlite_context(user_id: int) -> str:
     return "\n".join(lines)
 
 
-async def _build_scheduler_diary_context() -> str:
-    proactive_query = (
+async def _build_scheduler_cognee_context() -> str:
+    diary_query = (
         "Summarize the student's study habits, energy patterns, setbacks, healthy routines, "
         "and the most helpful next nudges or reminders a study coach should send soon."
     )
-    try:
-        answer = await query_diary(proactive_query)
-    except NoDataError:
-        return "No diary context found."
-    except CogneeServiceError as exc:
-        log.warning("Scheduler: diary retrieval unavailable: %s", exc)
-        return f"Diary retrieval unavailable: {exc}"
-    cleaned = answer.strip()
-    return cleaned or "No diary context found."
+    materials_query = (
+        "Summarize the important topics, concepts, and study areas present in the available "
+        "course materials that would help a study coach suggest timely review or quiz practice."
+    )
+    return await query_combined_context(
+        diary_query=diary_query,
+        materials_query=materials_query,
+    )
 
 
 async def _llm_checkin_loop() -> None:
@@ -259,7 +258,7 @@ async def _llm_checkin_loop() -> None:
                 log.info("Scheduler: no users found for proactive check-in")
                 continue
 
-            diary_context = await _build_scheduler_diary_context()
+            cognee_context = await _build_scheduler_cognee_context()
             log.debug(
                 "Scheduler: LLM check-in fetched %d recent log entries for %d user(s)",
                 len(recent),
@@ -273,7 +272,7 @@ async def _llm_checkin_loop() -> None:
                         _build_llm_user_prompt(
                             user_id=user_id,
                             sqlite_context=sqlite_context,
-                            diary_context=diary_context,
+                            cognee_context=cognee_context,
                             recent=recent,
                         ),
                     )

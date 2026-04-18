@@ -406,6 +406,44 @@ async def test_query_materials_passes_materials_system_prompt(mock_cognee):
     assert "diary" in prompt.lower() or "journal" in prompt.lower()
 
 
+@pytest.mark.asyncio
+async def test_query_combined_context_fetches_diary_and_materials(mock_cognee):
+    mock_cognee.search.side_effect = [["diary answer"], ["materials answer"]]
+
+    out = await cognee_service.query_combined_context(
+        diary_query="how am I doing?",
+        materials_query="what should I study?",
+    )
+
+    assert "Diary retrieval:\ndiary answer" in out
+    assert "Materials retrieval:\nmaterials answer" in out
+    calls = mock_cognee.search.await_args_list
+    assert calls[0].kwargs["datasets"] == ["diary"]
+    assert calls[0].kwargs["query_text"] == "how am I doing?"
+    assert calls[1].kwargs["datasets"] == ["materials"]
+    assert calls[1].kwargs["query_text"] == "what should I study?"
+
+
+@pytest.mark.asyncio
+async def test_query_combined_context_handles_no_data_and_errors(monkeypatch):
+    async def _fake_diary(_: str) -> str:
+        raise NoDataError("empty diary")
+
+    async def _fake_materials(_: str) -> str:
+        raise CogneeServiceError("provider unavailable", retryable=True)
+
+    monkeypatch.setattr(cognee_service, "query_diary", _fake_diary)
+    monkeypatch.setattr(cognee_service, "query_materials", _fake_materials)
+
+    out = await cognee_service.query_combined_context(
+        diary_query="x",
+        materials_query="y",
+    )
+
+    assert "Diary retrieval:\nNo relevant context found." in out
+    assert "Materials retrieval:\nRetrieval unavailable: provider unavailable" in out
+
+
 # ----- index_status --------------------------------------------------------
 
 def test_index_status_returns_snapshot():

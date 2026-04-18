@@ -40,6 +40,8 @@ function App() {
   const [error, setError] = useState('')
   const [status, setStatus] = useState('Log in with an existing username to load your chat history.')
   const [isLoggingIn, setIsLoggingIn] = useState(false)
+  const [signupName, setSignupName] = useState('')
+  const [isSigningUp, setIsSigningUp] = useState(false)
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [isSending, setIsSending] = useState(false)
   const listRef = useRef<HTMLDivElement | null>(null)
@@ -184,6 +186,40 @@ function App() {
     }
   }
 
+  async function handleSignup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    if (!signupName.trim()) {
+      setError('Enter a name to sign up.')
+      return
+    }
+
+    setIsSigningUp(true)
+    setError('')
+    setStatus('Signing up...')
+
+    try {
+      const response = await fetch('/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: signupName.trim() }),
+      })
+
+      if (!response.ok) {
+        throw new Error(await readError(response, 'Signup failed.'))
+      }
+
+      setStatus(`Signed up as ${signupName.trim()}. You can now log in.`)
+      setUsername(signupName.trim())
+      setSignupName('')
+    } catch (err) {
+      setError(toMessage(err))
+      setStatus('Could not sign up.')
+    } finally {
+      setIsSigningUp(false)
+    }
+  }
+
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
@@ -247,25 +283,45 @@ function App() {
           and cognee knowledge.
         </p>
 
-        <form className="login-card" onSubmit={handleLogin}>
-          <label htmlFor="username">Username</label>
-          <div className="login-row">
-            <input
-              id="username"
-              name="username"
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-              placeholder="existing username"
-              autoComplete="username"
-            />
-            <button type="submit" disabled={isLoggingIn}>
-              {isLoggingIn ? 'Logging in...' : 'Log in'}
-            </button>
-          </div>
-          <p className="helper-text">
-            {token ? `Authenticated as ${username || 'user'}.` : 'Login only: no signup flow here.'}
-          </p>
-        </form>
+        <div className="auth-row">
+          <form className="login-card" onSubmit={handleLogin}>
+            <label htmlFor="username">Log in</label>
+            <div className="login-row">
+              <input
+                id="username"
+                name="username"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                placeholder="existing username"
+                autoComplete="username"
+              />
+              <button type="submit" disabled={isLoggingIn}>
+                {isLoggingIn ? 'Logging in...' : 'Log in'}
+              </button>
+            </div>
+            <p className="helper-text">
+              {token ? `Authenticated as ${username || 'user'}.` : 'Enter an existing username.'}
+            </p>
+          </form>
+
+          <form className="login-card" onSubmit={handleSignup}>
+            <label htmlFor="signup-name">Sign up</label>
+            <div className="login-row">
+              <input
+                id="signup-name"
+                name="signup-name"
+                value={signupName}
+                onChange={(event) => setSignupName(event.target.value)}
+                placeholder="pick a name"
+                autoComplete="off"
+              />
+              <button type="submit" disabled={isSigningUp}>
+                {isSigningUp ? 'Signing up...' : 'Sign up'}
+              </button>
+            </div>
+            <p className="helper-text">New here? Create an account.</p>
+          </form>
+        </div>
 
         <div className="status-card" aria-live="polite">
           <strong>Status</strong>

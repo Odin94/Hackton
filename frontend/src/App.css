@@ -28,6 +28,17 @@
   max-width: 34rem;
 }
 
+.auth-row {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.auth-row .login-card {
+  flex: 1;
+  min-width: 0;
+}
+
 .login-card,
 .status-card {
   border: 1px solid rgba(247, 242, 232, 0.16);
