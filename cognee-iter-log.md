@@ -27,11 +27,12 @@ Conventions:
 
 ## Status snapshot
 
-- **Repo state:** `main@213ee80` (local); iter 17 changes uncommitted (pending rebase + push).
+- **Repo state:** `main@d8da1f2` — narrative diary entries + seed.sh landed.
 - **Tests:** 119 passing (`cd backend && uv run pytest`, ~0.9s — 107 ours + 12 from Odin's agent tests). `uv run ruff check` clean.
 - **Live verified:** Full 3-course corpus (DS + EI + Analysis, 28 PDFs, 1356 pages) ingested + cognified in ~90s. Quiz on "graphs" returns 3 grounded DS questions with correct source_ref. Diary isolation degraded with full corpus (see open threads).
 - **Live smoke harness:** `backend/scripts/live_smoke.py` — `uv run python -m scripts.live_smoke [--pdf PATH] [--course NAME] [--topic TOPIC] [--n N] [--skip-ingest]`. Now prints page count + ETA before cognify and elapsed time after.
 - **Corpus on disk:** 42 PDFs. 28 ingested (DS + EI + Analysis). ERA (10 PDFs, 126 MB, up to 24 MB each) excluded — too slow to cognify for demo.
+- **Diary:** 33 narrative entries in `data/diary/` (Sep 22 – Nov 13 2025). Persona: Odin, CS student, AI-engineering focus (curious drifter). Demo moment: Nov 13 formal languages lecture, TumTum pings post-lecture. Cognee pre-seeded on demo machine. `seed.sh` at repo root resets + ingests + cognifies (~5 min).
 - **Spec deltas:** 14 queued in `notes/spec-deltas.md`. None applied to the spec file itself.
 
 ## Open threads (things that opened but didn't close)
