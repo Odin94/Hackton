@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
-from typing import Literal
+import time
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Literal
 
 from app.config import settings  # must import before cognee to normalize env
 
@@ -23,6 +25,25 @@ class CogneeServiceError(Exception):
     def __init__(self, message: str, *, retryable: bool = False):
         super().__init__(message)
         self.retryable = retryable
+
+
+# Default wall-clock cap on the quiz LLM call. Intentionally generous:
+# cognee's own cognify call inside the same process can be much longer, and
+# the quiz endpoint is user-triggered, not background.
+_LLM_TIMEOUT_SECONDS = 30.0
+
+
+@asynccontextmanager
+async def _timed(label: str, **fields: object) -> AsyncIterator[None]:
+    """Log duration of a block at INFO. Fields render as key=value pairs."""
+    start = time.perf_counter()
+    detail = " ".join(f"{k}={v}" for k, v in fields.items())
+    log.info("%s start %s", label, detail)
+    try:
+        yield
+    finally:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        log.info("%s done %s elapsed_ms=%d", label, detail, elapsed_ms)
 
 
 def _sanitize(text: str) -> str:
@@ -106,13 +127,13 @@ async def add_material(material: Material) -> None:
 async def cognify_dataset(dataset: Dataset) -> None:
     async with _locks[dataset]:
         _state[dataset] = "indexing"
-        log.info("cognify start dataset=%s", dataset)
         try:
-            await cognee.cognify(datasets=[dataset])
-            log.info("cognify done dataset=%s", dataset)
-        except Exception as e:
-            log.exception("cognify failed dataset=%s", dataset)
-            raise _wrap(e) from e
+            async with _timed("cognify", dataset=dataset):
+                try:
+                    await cognee.cognify(datasets=[dataset])
+                except Exception as e:
+                    log.exception("cognify failed dataset=%s", dataset)
+                    raise _wrap(e) from e
         finally:
             _state[dataset] = "idle"
 
@@ -120,14 +141,15 @@ async def cognify_dataset(dataset: Dataset) -> None:
 async def _query(dataset: Dataset, q: str) -> str:
     if not q.strip():
         raise ValueError("empty query")
-    try:
-        results = await cognee.search(
-            query_type=SearchType.GRAPH_COMPLETION,
-            query_text=q,
-            datasets=[dataset],
-        )
-    except Exception as e:
-        raise _wrap(e) from e
+    async with _timed("query", dataset=dataset, q_len=len(q)):
+        try:
+            results = await cognee.search(
+                query_type=SearchType.GRAPH_COMPLETION,
+                query_text=q,
+                datasets=[dataset],
+            )
+        except Exception as e:
+            raise _wrap(e) from e
     if isinstance(results, (str, dict)):
         results = [results]
     return "\n".join(str(r) for r in results)
@@ -180,6 +202,11 @@ async def generate_quiz(topic: str, n: int = 5) -> list[QuizItem]:
     if n < 1:
         raise ValueError("n must be >= 1")
 
+    async with _timed("quiz", topic=topic, n=n):
+        return await _generate_quiz_inner(topic, n)
+
+
+async def _generate_quiz_inner(topic: str, n: int) -> list[QuizItem]:
     try:
         chunks = await cognee.search(
             query_type=SearchType.CHUNKS,
@@ -247,24 +274,31 @@ async def _quiz_llm_call_with_retry(system_prompt: str, user_prompt: str) -> lis
 
 async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
     try:
-        response = await litellm.acompletion(
-            model=settings.llm_model,
-            api_key=settings.llm_api_key,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            extra_body={
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "quiz",
-                        "strict": True,
-                        "schema": _QUIZ_SCHEMA,
-                    },
-                }
-            },
+        response = await asyncio.wait_for(
+            litellm.acompletion(
+                model=settings.llm_model,
+                api_key=settings.llm_api_key,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                extra_body={
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "quiz",
+                            "strict": True,
+                            "schema": _QUIZ_SCHEMA,
+                        },
+                    }
+                },
+            ),
+            timeout=_LLM_TIMEOUT_SECONDS,
         )
+    except asyncio.TimeoutError as e:
+        raise CogneeServiceError(
+            f"LLM call exceeded {_LLM_TIMEOUT_SECONDS}s timeout", retryable=True
+        ) from e
     except Exception as e:
         raise _wrap(e) from e
 

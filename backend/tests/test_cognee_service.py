@@ -449,3 +449,23 @@ async def test_generate_quiz_rejects_empty_topic(mock_cognee, mock_litellm):
 async def test_generate_quiz_rejects_zero_n(mock_cognee, mock_litellm):
     with pytest.raises(ValueError):
         await cognee_service.generate_quiz("topic", n=0)
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_llm_timeout_surfaces_as_retryable(
+    mock_cognee, mock_litellm, monkeypatch
+):
+    """When litellm takes longer than _LLM_TIMEOUT_SECONDS, raise retryable error."""
+    mock_cognee.search.return_value = _chunks_with_source()
+    monkeypatch.setattr(cognee_service, "_LLM_TIMEOUT_SECONDS", 0.01)
+
+    async def slow(*args, **kwargs):
+        await asyncio.sleep(0.5)
+        return llm_response(json.dumps({"items": [{"question": "Q", "answer": "A"}]}))
+
+    mock_litellm.side_effect = slow
+
+    with pytest.raises(CogneeServiceError) as excinfo:
+        await cognee_service.generate_quiz("topic", n=1)
+    assert excinfo.value.retryable is True
+    assert "timeout" in str(excinfo.value).lower()
