@@ -590,7 +590,87 @@ const MOCK_QUICK_ACTIONS = [
   { key: 'tumtum', label: 'Ask TumTum anything' },
 ]
 
+const MOCK_COURSES: OverviewCourse[] = [
+  { id: -1, name: 'Diskrete Strukturen' },
+  { id: -2, name: 'Einführung in die Informatik' },
+  { id: -3, name: 'Einführung in die Rechnerarchitektur' },
+]
+
+const MOCK_EVENTS: OverviewEvent[] = [
+  {
+    id: -1,
+    course_name: 'Diskrete Strukturen',
+    type: 'Tutorial',
+    name: 'DS Tutorgruppe 4 · Powerset practice',
+    start_datetime: '2025-11-14T14:00:00Z',
+    end_datetime: '2025-11-14T15:30:00Z',
+  },
+  {
+    id: -2,
+    course_name: 'Einführung in die Informatik',
+    type: 'Lecture',
+    name: 'EInf · Rekursion (H5 prep)',
+    start_datetime: '2025-11-17T10:00:00Z',
+    end_datetime: '2025-11-17T11:30:00Z',
+  },
+  {
+    id: -3,
+    course_name: 'Einführung in die Rechnerarchitektur',
+    type: 'Lecture',
+    name: 'ERA · Cache hierarchies',
+    start_datetime: '2025-11-18T08:00:00Z',
+    end_datetime: '2025-11-18T09:30:00Z',
+  },
+  {
+    id: -4,
+    course_name: 'Diskrete Strukturen',
+    type: 'Lecture',
+    name: 'DS · DFA minimization',
+    start_datetime: '2025-11-19T09:30:00Z',
+    end_datetime: '2025-11-19T11:00:00Z',
+  },
+]
+
+const MOCK_DEADLINES: OverviewDeadline[] = [
+  {
+    id: -1,
+    course_name: 'Diskrete Strukturen',
+    name: 'DS Übungsblatt 8',
+    datetime: '2025-11-18T23:59:00Z',
+  },
+  {
+    id: -2,
+    course_name: 'Einführung in die Informatik',
+    name: 'EInf H5 (Rekursion)',
+    datetime: '2025-11-20T23:59:00Z',
+  },
+  {
+    id: -3,
+    course_name: 'Einführung in die Rechnerarchitektur',
+    name: 'ERA Quiz 3',
+    datetime: '2025-11-22T12:00:00Z',
+  },
+]
+
+const MOCK_QUIZ_STAT: OverviewQuizStat = {
+  total_taken: 7,
+  average_percent: 73,
+}
+
 function Sidebar({ overview }: { overview: OverviewResp | null }) {
+  const courses =
+    overview && overview.courses.length > 0 ? overview.courses : MOCK_COURSES
+  const events =
+    overview && overview.upcoming_events.length > 0
+      ? overview.upcoming_events
+      : MOCK_EVENTS
+  const deadlines =
+    overview && overview.upcoming_deadlines.length > 0
+      ? overview.upcoming_deadlines
+      : MOCK_DEADLINES
+  const quiz =
+    overview && overview.quiz.total_taken > 0 ? overview.quiz : MOCK_QUIZ_STAT
+
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -697,18 +777,14 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
       </SidebarSection>
 
       <SidebarSection title="Courses">
-        {overview && overview.courses.length > 0 ? (
-          <ul className="sidebar-list">
-            {overview.courses.map((course) => (
-              <li key={course.id} className="sidebar-item">
-                <span className="sidebar-dot" aria-hidden />
-                <span>{course.name}</span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="sidebar-empty">No courses on file.</p>
-        )}
+        <ul className="sidebar-list">
+          {courses.map((course) => (
+            <li key={course.id} className="sidebar-item">
+              <span className="sidebar-dot" aria-hidden />
+              <span>{course.name}</span>
+            </li>
+          ))}
+        </ul>
       </SidebarSection>
 
       <SidebarSection title="Recent wins">
@@ -734,62 +810,50 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
       </SidebarSection>
 
       <SidebarSection title="Upcoming events">
-        {overview && overview.upcoming_events.length > 0 ? (
-          <ul className="sidebar-list">
-            {overview.upcoming_events.map((event) => (
-              <li key={event.id} className="sidebar-item sidebar-item-stack">
-                <div className="sidebar-item-row">
-                  <span className="sidebar-item-title">{event.name}</span>
-                  <Badge variant="accent">{event.type}</Badge>
-                </div>
-                <div className="sidebar-item-meta">
-                  <span className="sidebar-item-course">{event.course_name}</span>
-                  <span className="sidebar-item-time">{formatDayTime(event.start_datetime)}</span>
-                </div>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="sidebar-empty">Nothing scheduled.</p>
-        )}
+        <ul className="sidebar-list">
+          {events.map((event) => (
+            <li key={event.id} className="sidebar-item sidebar-item-stack">
+              <div className="sidebar-item-row">
+                <span className="sidebar-item-title">{event.name}</span>
+                <Badge variant="accent">{event.type}</Badge>
+              </div>
+              <div className="sidebar-item-meta">
+                <span className="sidebar-item-course">{event.course_name}</span>
+                <span className="sidebar-item-time">{formatDayTime(event.start_datetime)}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
       </SidebarSection>
 
       <SidebarSection title="Deadlines">
-        {overview && overview.upcoming_deadlines.length > 0 ? (
-          <ul className="sidebar-list">
-            {overview.upcoming_deadlines.map((deadline) => (
-              <li key={deadline.id} className="sidebar-item sidebar-item-stack">
-                <div className="sidebar-item-row">
-                  <span className="sidebar-item-title">{deadline.name}</span>
-                  <Badge variant="danger">Due</Badge>
-                </div>
-                <div className="sidebar-item-meta">
-                  <span className="sidebar-item-course">{deadline.course_name}</span>
-                  <span className="sidebar-item-time">{formatDayTime(deadline.datetime)}</span>
-                </div>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="sidebar-empty">No pending deadlines.</p>
-        )}
+        <ul className="sidebar-list">
+          {deadlines.map((deadline) => (
+            <li key={deadline.id} className="sidebar-item sidebar-item-stack">
+              <div className="sidebar-item-row">
+                <span className="sidebar-item-title">{deadline.name}</span>
+                <Badge variant="danger">Due</Badge>
+              </div>
+              <div className="sidebar-item-meta">
+                <span className="sidebar-item-course">{deadline.course_name}</span>
+                <span className="sidebar-item-time">{formatDayTime(deadline.datetime)}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
       </SidebarSection>
 
       <SidebarSection title="Quiz performance">
-        {overview ? (
-          <div className="sidebar-stats">
-            <div className="sidebar-stat">
-              <span className="sidebar-stat-value">{overview.quiz.total_taken}</span>
-              <span className="sidebar-stat-label">quizzes</span>
-            </div>
-            <div className="sidebar-stat">
-              <span className="sidebar-stat-value">{overview.quiz.average_percent}%</span>
-              <span className="sidebar-stat-label">avg score</span>
-            </div>
+        <div className="sidebar-stats">
+          <div className="sidebar-stat">
+            <span className="sidebar-stat-value">{quiz.total_taken}</span>
+            <span className="sidebar-stat-label">quizzes</span>
           </div>
-        ) : (
-          <p className="sidebar-empty">Loading…</p>
-        )}
+          <div className="sidebar-stat">
+            <span className="sidebar-stat-value">{quiz.average_percent}%</span>
+            <span className="sidebar-stat-label">avg score</span>
+          </div>
+        </div>
       </SidebarSection>
     </aside>
   )
