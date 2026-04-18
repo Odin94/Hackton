@@ -152,13 +152,78 @@ async def test_add_diary_entry_wraps_cognee_failures(mock_cognee):
 
 
 @pytest.mark.asyncio
-async def test_add_material_sends_header_line(mock_cognee):
+async def test_add_material_ingests_as_file_preserving_source_name(mock_cognee):
+    """Critical: cognee must receive an absolute file path whose filename is
+    `material.source`, otherwise Document.name falls back to 'text_<md5>.txt'
+    and every QuizItem.source_ref is useless gibberish (spec §10 item 4)."""
+    from pathlib import Path
+
+    captured: dict = {}
+
+    async def capture(data, dataset_name):
+        # Record state while the file still exists (it's deleted after cognee.add returns).
+        captured["data"] = data
+        captured["dataset_name"] = dataset_name
+        captured["filename"] = Path(data).name
+        captured["content"] = Path(data).read_text(encoding="utf-8")
+
+    mock_cognee.add.side_effect = capture
+
     mat = Material(text="Transformers explained...", source="ml-l3.md", course="ML-L3")
     await cognee_service.add_material(mat)
-    kwargs = mock_cognee.add.await_args.kwargs
-    assert kwargs["dataset_name"] == "materials"
-    assert kwargs["data"].startswith("[source=ml-l3.md course=ML-L3]\n")
-    assert "Transformers explained..." in kwargs["data"]
+
+    assert captured["dataset_name"] == "materials"
+    # cognee must see a path, not the raw body string.
+    assert Path(captured["data"]).is_absolute()
+    # Filename IS the original source — the whole point of the fix.
+    assert captured["filename"] == "ml-l3.md"
+    # Header + text still present in the file content so the entity extractor sees them.
+    assert captured["content"].startswith("[source=ml-l3.md course=ML-L3]\n")
+    assert "Transformers explained..." in captured["content"]
+    # Tempdir is cleaned up after cognee.add returns.
+    assert not Path(captured["data"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_add_material_sanitizes_unsafe_source_filename(mock_cognee):
+    """Path-traversal attempts in `source` must not escape the tempdir."""
+    from pathlib import Path
+
+    captured: dict = {}
+
+    async def capture(data, dataset_name):
+        captured["filename"] = Path(data).name
+        captured["parent"] = str(Path(data).parent)
+
+    mock_cognee.add.side_effect = capture
+
+    mat = Material(text="content", source="../../etc/passwd", course="C")
+    await cognee_service.add_material(mat)
+
+    assert "/" not in captured["filename"]
+    assert ".." not in captured["filename"]
+    # The parent is the per-call tempdir, not somewhere outside.
+    assert "cognee_material_" in captured["parent"]
+
+
+@pytest.mark.asyncio
+async def test_add_material_cleans_up_tempdir_on_cognee_failure(mock_cognee):
+    """If cognee.add raises, the tempdir is still removed — no leak."""
+    from pathlib import Path
+
+    captured: dict = {}
+
+    async def capture(data, dataset_name):
+        captured["data"] = data
+        raise RuntimeError("cognee down")
+
+    mock_cognee.add.side_effect = capture
+
+    mat = Material(text="c", source="x.md", course="C")
+    with pytest.raises(CogneeServiceError):
+        await cognee_service.add_material(mat)
+
+    assert not Path(captured["data"]).parent.exists()
 
 
 # ----- cognify_dataset -----------------------------------------------------

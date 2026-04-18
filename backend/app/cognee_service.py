@@ -11,9 +11,13 @@ Tests mock `cognee` and `litellm` at the module boundary — see
 import asyncio
 import json
 import logging
+import re
+import shutil
+import tempfile
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Literal
 
 import cognee
@@ -166,14 +170,42 @@ async def add_diary_entry(entry: DiaryEntry) -> None:
         raise _wrap(e) from e
 
 
+_SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe_filename(source: str) -> str:
+    """Sanitize `material.source` into a filesystem-safe filename that still
+    round-trips as the Document.name cognee will store."""
+    cleaned = _SAFE_FILENAME.sub("_", source).strip("._") or "material"
+    # Cap to 200 chars so tempdir+filename fits under common FS limits.
+    return cleaned[:200]
+
+
 async def add_material(material: Material) -> None:
+    """Ingest a lecture material.
+
+    Writes the body to a tempdir under `material.source` as the filename,
+    then hands cognee the file path — this is the only way to make
+    `Document.name` (and therefore `QuizItem.source_ref`) preserve the
+    original filename. Passing a raw string makes cognee generate a
+    `text_<md5>.txt` name (see `save_data_to_file`), losing provenance.
+    """
     text = _sanitize(material.text)
     body = f"[source={material.source} course={material.course}]\n{text}"
     log.info("add_material source=%s course=%s", material.source, material.course)
+
+    # Isolated tempdir per call so concurrent adds with the same `source`
+    # can't race on the file.
+    scratch = tempfile.mkdtemp(prefix="cognee_material_")
     try:
-        await cognee.add(data=body, dataset_name="materials")
-    except Exception as e:
-        raise _wrap(e) from e
+        file_path = Path(scratch) / _safe_filename(material.source)
+        file_path.write_text(body, encoding="utf-8")
+        try:
+            await cognee.add(data=str(file_path), dataset_name="materials")
+        except Exception as e:
+            raise _wrap(e) from e
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 async def cognify_dataset(dataset: Dataset) -> None:
