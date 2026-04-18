@@ -11,7 +11,7 @@ Returns the list of Notification IDs that were created so callers can track them
 """
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -138,6 +138,105 @@ async def generate_quizzes_for_user_events(user_id: int) -> list[int]:
     """
     async with AsyncSessionLocal() as session:
         return await _generate_quizzes_impl(user_id, session)
+
+
+async def _ensure_quizzes_impl(
+    user_id: int, session: AsyncSession, lookahead_seconds: int
+) -> list[int]:
+    """Generate quizzes for upcoming events that don't have one yet.
+
+    Only considers events whose start_datetime falls within the next
+    *lookahead_seconds* and that have no quiz linked via quiz_schedule_events.
+    """
+    now = datetime.now(UTC)
+    cutoff = now + timedelta(seconds=lookahead_seconds)
+
+    events = (
+        await session.execute(
+            select(ScheduleEvent)
+            .where(ScheduleEvent.user_id == user_id)
+            .where(ScheduleEvent.start_datetime >= now)
+            .where(ScheduleEvent.start_datetime <= cutoff)
+            .where(~ScheduleEvent.quizzes.any())
+        )
+    ).scalars().all()
+
+    if not events:
+        log.info(
+            "ensure_quizzes: no upcoming events without quizzes for user_id=%d (lookahead=%ds)",
+            user_id,
+            lookahead_seconds,
+        )
+        return []
+
+    log.info(
+        "ensure_quizzes: found %d event(s) needing quizzes for user_id=%d",
+        len(events),
+        user_id,
+    )
+    notification_ids: list[int] = []
+
+    for event in events:
+        log.debug("ensure_quizzes: processing event='%s' user_id=%d", event.name, user_id)
+        try:
+            quiz_items = await cognee_generate_quiz(topic=event.name)
+        except NoDataError:
+            log.warning(
+                "ensure_quizzes: skipping event '%s' — no cognee data available", event.name
+            )
+            continue
+        except Exception:
+            log.warning("ensure_quizzes: quiz generation failed for event '%s'", event.name, exc_info=True)
+            continue
+
+        duration_mins = max(1, len(quiz_items) * _MINUTES_PER_QUESTION)
+        quiz = Quiz(
+            user_id=user_id,
+            course_id=event.course_id,
+            title=f"Quiz: {event.name}",
+            topic=event.name,
+            estimated_duration_minutes=duration_mins,
+            questions=[item.model_dump() for item in quiz_items],
+        )
+        quiz.schedule_events.append(event)
+        session.add(quiz)
+        await session.flush()
+
+        notif = Notification(
+            user_id=user_id,
+            status="pending",
+            target_datetime=event.end_datetime,
+            content=(
+                f"Your lecture '{event.name}' just ended — time to test what you learned! "
+                "Your personalised quiz is ready."
+            ),
+            quiz_id=quiz.id,
+        )
+        session.add(notif)
+        await session.flush()
+        notification_ids.append(notif.id)
+        log.info(
+            "ensure_quizzes: created quiz_id=%d notification_id=%d for event '%s' (fires at %s)",
+            quiz.id,
+            notif.id,
+            event.name,
+            event.end_datetime.isoformat(),
+        )
+
+    if notification_ids:
+        await session.commit()
+
+    return notification_ids
+
+
+async def ensure_quizzes_for_upcoming_events(user_id: int, lookahead_seconds: int) -> list[int]:
+    """Ensure every event starting within *lookahead_seconds* has a quiz + notification.
+
+    Idempotent: events that already have a quiz linked are skipped.
+    Returns notification IDs created this run.
+    """
+    async with AsyncSessionLocal() as session:
+        return await _ensure_quizzes_impl(user_id, session, lookahead_seconds)
 
 
 # ---------------------------------------------------------------------------
