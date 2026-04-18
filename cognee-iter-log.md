@@ -14,7 +14,7 @@ Conventions:
 - **Repo state:** `main@213ee80` (local + `origin/main` in sync). Iter 16 pushed, clean working tree.
 - **Tests:** 119 passing (`cd backend && uv run pytest`, ~0.7s — 107 ours + 12 from Odin's agent tests). `uv run ruff check` clean.
 - **Live verified:** Iter 16 smoke test on one 50KB PDF (`data/Einführung_in_die_Informatik/materials/folien-11a.pdf`) ran ingest → cognify → quiz → isolation check end-to-end. Real OpenRouter (gpt-4o-mini via LiteLLM tool-use) + OpenAI (embeddings, text-embedding-3-small direct). `source_ref` surfaces as the course label ("Einführung_in_die_Informatik") via `belongs_to_set`. Empty-diary query correctly raises `NoDataError`.
-- **Smoke test harness:** `/tmp/claude/smoke_test.py` — one-shot live probe. Not in the repo, recreate from iter-16 patterns if needed. Imports `app.cognee_service`, ingests one PDF, cognifies, runs `generate_quiz("boolean logic", n=3)`, then queries diary expecting NoDataError.
+- **Live smoke harness:** `backend/scripts/live_smoke.py` — `uv run python -m scripts.live_smoke [--pdf PATH] [--course NAME] [--topic TOPIC] [--n N] [--skip-ingest]`. Manual probe, NOT in pytest. Costs ~$0.01, runs ~1–3 min. Defaults to `folien-11a.pdf` + topic "polymorphism".
 - **Corpus on disk:** 42 PDFs at `~/workspace/Hackton/data/<course>/materials/`. 1 ingested (folien-11a.pdf). 41 untested.
 - **Spec deltas:** 14 queued in `notes/spec-deltas.md`. None applied to the spec file itself.
 
