@@ -162,3 +162,6 @@ Agentic workflows, knowledge pipelines, market place of plugins (also open sourc
   * Create quiz
   * Modify schedule
   * (evaluate performance; we can probably do that with simple statistics?)
+
+* Run schedules with good ol' python ("30min after lecture" we literally just run on a scheduler)
+  * If we still have time, make it fully agentic (for the flavor)
