@@ -9,6 +9,12 @@ Conventions:
 
 ---
 
+## Iteration 9 — OpenAPI polish (88 tests)
+
+- Every route has a `summary=`, a short docstring (surfaces as route description in `/docs`), and a `tags=` grouping (`ingest` / `index` / `query` / `health`). `/docs` page now has clean collapsible sections instead of a flat list.
+- Module-level docstring on `routes_cognee.py` and `cognee_service.py` summarizing purpose and where tests live.
+- No behavioral change.
+
 ## Iteration 8 — guard empty-text chunks (88 tests)
 
 - `generate_quiz` now raises `CogneeServiceError("…had no text content", retryable=True)` when `chunks` is non-empty but every chunk has blank text. Previously we'd have sent the LLM an empty context and let it hallucinate freely.

@@ -1,3 +1,13 @@
+"""Cognee memory layer service.
+
+Owns the two cognee datasets (`diary`, `materials`) and the contracts in
+`notes/spec-cognee.md` §3. All functions are async; errors are normalized to
+`CogneeServiceError` with a `.retryable` hint. Per-dataset `asyncio.Lock`s
+serialize cognify calls (§7); add/query/quiz calls run freely.
+
+Tests mock `cognee` and `litellm` at the module boundary — see
+`backend/tests/conftest.py`.
+"""
 import asyncio
 import json
 import logging
