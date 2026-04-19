@@ -88,7 +88,7 @@ function EventCard({ event }: { event: DiscoveredEvent }) {
       {event.score_reasoning && <p className="event-reasoning">{event.score_reasoning}</p>}
       <div className="event-meta">
         {event.event_date && <span className="event-meta-item">📅 {event.event_date}</span>}
-        {event.location && <span className="event-meta-item">📍 {event.location}</span>}
+        {event.location ? <span className="event-meta-item">📍 {event.location}</span> : null}
         {event.signup_deadline && <span className="event-meta-item">⏰ Signup by {event.signup_deadline}</span>}
       </div>
       <p className="event-description">
@@ -720,7 +720,12 @@ function App() {
                 <textarea
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.currentTarget.form?.requestSubmit() } }}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return
+                    if (e.metaKey || e.ctrlKey) return
+                    e.preventDefault()
+                    void handleSend(e as unknown as FormEvent<HTMLFormElement>)
+                  }}
                   placeholder="Ask about your study notes, quizzes, or schedule…"
                   rows={3}
                   disabled={isSending}
@@ -728,7 +733,7 @@ function App() {
                 <div className="composer-row">
                   {chatError
                     ? <p className="inline-error">{chatError}</p>
-                    : <p className="composer-hint">⌘ Enter to send</p>}
+                    : <p className="composer-hint">Enter to send. Cmd/Ctrl+Enter for a new line.</p>}
                   <div className="composer-actions">
                     <button
                       type="button"

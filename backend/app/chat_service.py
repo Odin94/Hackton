@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import litellm
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent.database import AsyncSessionLocal
@@ -28,6 +28,7 @@ from agent.models import (
 )
 from app import cognee_service
 from app.config import settings
+from app.llm_context import with_current_datetime_context
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +44,13 @@ _DEMO_STATUS_AWAITING_ENERGY = "awaiting_energy_checkin"
 _DEMO_STATUS_COMPLETE = "complete"
 _DEMO_DEFAULT_AVERAGE_SCORE_PERCENT = 72
 _DEMO_MINUTES_PER_QUESTION = 2
+_DEMO_CHAT_MARKERS = (
+    "Did you get through today's slides?",
+    "Okay, here's your quiz covering the first ",
+    "Use the multiple-choice popup and I'll score it when you finish.",
+    "How energized and focused are you feeling today?",
+)
+_DEMO_COVERAGE_RE = re.compile(r"\b(100|[1-9]?\d)\s*%")
 
 # Messages longer than this that don't match the skip pattern still get cognee.
 _COGNEE_LONG_MESSAGE_THRESHOLD = 80
@@ -80,6 +88,22 @@ class ToolEvent:
     status: str
     detail: str
     surface_to_user: bool = True
+
+
+@dataclass
+class DemoQuizResultSummary:
+    correct_answers: int
+    false_answers: int
+    total_answers: int
+    score_percent: int
+    average_score_percent: int
+    comparison: str
+
+
+@dataclass
+class DemoQuizLaunch:
+    quiz: Quiz
+    assistant_message: ChatMessage
 
 _CHAT_TOOLS: list[dict[str, Any]] = [
     {
@@ -185,42 +209,6 @@ _CHAT_TOOLS: list[dict[str, Any]] = [
                     "future_goals": {"type": "string"},
                 },
                 "required": ["interests", "future_goals"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "generate_demo_quiz",
-            "description": (
-                "During the scripted demo flow, generate and store a grounded quiz from the "
-                "materials dataset for the active demo course. Use this instead of inventing a quiz."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "coverage_percent": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "question_count": {"type": "integer", "minimum": 1, "maximum": 5},
-                },
-                "required": ["coverage_percent"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "record_demo_quiz_result",
-            "description": (
-                "Persist the graded result for the active demo quiz after comparing the user's "
-                "answers against the stored answer key."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "correct_answers": {"type": "integer", "minimum": 0},
-                    "false_answers": {"type": "integer", "minimum": 0},
-                },
-                "required": ["correct_answers", "false_answers"],
             },
         },
     },
@@ -338,7 +326,10 @@ async def append_chat_message(
     return message
 
 
-async def create_chat_reply(user_id: int, content: str) -> tuple[ChatMessage, ChatMessage]:
+async def create_chat_reply(
+    user_id: int,
+    content: str,
+) -> tuple[ChatMessage, ChatMessage, DemoQuizLaunch | None]:
     cleaned = content.strip()
     if not cleaned:
         raise ValueError("message cannot be empty")
@@ -368,12 +359,21 @@ async def create_chat_reply(user_id: int, content: str) -> tuple[ChatMessage, Ch
             user_message.sequence_number,
         )
 
+    demo_launch: DemoQuizLaunch | None = None
     try:
         async with AsyncSessionLocal() as session:
-            response_text = await _generate_chat_response(session, user_id, cleaned)
-            system_message = await append_chat_message(
-                session, user_id=user_id, author="system", content=response_text
+            demo_launch = await _maybe_start_interactive_demo_from_chat(
+                session,
+                user_id,
+                cleaned,
             )
+            if demo_launch is not None:
+                system_message = demo_launch.assistant_message
+            else:
+                response_text = await _generate_chat_response(session, user_id, cleaned)
+                system_message = await append_chat_message(
+                    session, user_id=user_id, author="system", content=response_text
+                )
             await session.commit()
             await session.refresh(system_message)
     except Exception:
@@ -392,7 +392,7 @@ async def create_chat_reply(user_id: int, content: str) -> tuple[ChatMessage, Ch
         system_message.sequence_number,
         _preview(system_message.content),
     )
-    return user_message, system_message
+    return user_message, system_message, demo_launch
 
 
 async def deliver_due_notifications_as_chat_messages(user_id: int) -> list[ChatMessage]:
@@ -464,6 +464,18 @@ async def activate_demo_conversation(
 
     async with AsyncSessionLocal() as session:
         await session.execute(
+            delete(ChatMessage).where(
+                ChatMessage.user_id == user_id,
+                ChatMessage.author == "system",
+                (
+                    ChatMessage.content.contains(_DEMO_CHAT_MARKERS[0])
+                    | ChatMessage.content.contains(_DEMO_CHAT_MARKERS[1])
+                    | ChatMessage.content.contains(_DEMO_CHAT_MARKERS[2])
+                    | ChatMessage.content.contains(_DEMO_CHAT_MARKERS[3])
+                ),
+            )
+        )
+        await session.execute(
             update(Notification)
             .where(
                 Notification.user_id == user_id,
@@ -517,6 +529,43 @@ async def activate_demo_conversation(
     return notification, delivered
 
 
+def _render_demo_quiz_intro(*, coverage_percent: int) -> str:
+    return (
+        f"Okay, here's your quiz covering the first {coverage_percent}% of today's slides. "
+        "Use the multiple-choice popup and I'll score it when you finish."
+    )
+
+
+def _render_demo_quiz_feedback(summary: DemoQuizResultSummary) -> str:
+    return (
+        f"You got {summary.correct_answers}/{summary.total_answers} right, which is "
+        f"{summary.score_percent}%. That's {summary.comparison} than your average of "
+        f"{summary.average_score_percent}%.\n\nHow energized and focused are you feeling today?"
+    )
+
+
+def _extract_demo_coverage_percent(message: str) -> int | None:
+    match = _DEMO_COVERAGE_RE.search(message)
+    if match:
+        return int(match.group(1))
+
+    lowered = message.casefold()
+    if "half" in lowered:
+        return 50
+    if "all of" in lowered or "all the slides" in lowered or "everything" in lowered:
+        return 100
+    if "none of" in lowered or "didn't get through" in lowered:
+        return 0
+    return None
+
+
+def _is_demo_chat_message(message: ChatMessage) -> bool:
+    if message.author == "user":
+        return True
+    content = message.content
+    return any(marker in content for marker in _DEMO_CHAT_MARKERS)
+
+
 async def _demo_state_for_user(
     session: AsyncSession,
     user_id: int,
@@ -541,13 +590,6 @@ def _demo_status_label(status: str) -> str:
         _DEMO_STATUS_COMPLETE: "complete",
     }
     return mapping.get(status, status)
-
-
-def _render_quiz_questions(questions: list[dict[str, Any]]) -> str:
-    return "\n\n".join(
-        f"{index}. {str(question.get('question', '')).strip()}"
-        for index, question in enumerate(questions, start=1)
-    )
 
 
 async def _create_demo_quiz(
@@ -580,14 +622,10 @@ async def _create_demo_quiz(
     state.status = _DEMO_STATUS_AWAITING_QUIZ
     await session.flush()
 
-    question_block = _render_quiz_questions(quiz.questions)
     detail = (
         f"Stored demo quiz quiz_id={quiz.id} for course={state.course_name!r}, "
         f"coverage={coverage_percent}%, topic={quiz_topic!r}. "
-        "Present the quiz as open-ended questions only. Do not invent multiple-choice options. "
-        "After the questions, instruct the user to reply with numbered free-text answers like "
-        "`1. ... 2. ... 3. ...`.\n"
-        f"Questions:\n{question_block}"
+        "Frontend will present the stored multiple-choice quiz directly."
     )
     return quiz, state, detail
 
@@ -598,7 +636,7 @@ async def _record_demo_quiz_result(
     *,
     correct_answers: int,
     false_answers: int,
-) -> tuple[DemoConversationState, str]:
+) -> tuple[DemoConversationState, str, DemoQuizResultSummary]:
     state = await _demo_state_for_user(session, user_id)
     if state is None or state.quiz_id is None:
         raise ValueError("no active demo quiz exists for this user")
@@ -645,7 +683,99 @@ async def _record_demo_quiz_result(
         f"correct={correct_answers}, false={false_answers}, score={score_percent}%. "
         f"Historical average before this quiz={average_score}%, so this performance is {comparison}."
     )
-    return state, detail
+    return (
+        state,
+        detail,
+        DemoQuizResultSummary(
+            correct_answers=correct_answers,
+            false_answers=false_answers,
+            total_answers=total_answers,
+            score_percent=score_percent,
+            average_score_percent=average_score,
+            comparison=comparison,
+        ),
+    )
+
+
+async def start_interactive_demo_quiz(
+    user_id: int,
+    *,
+    coverage_percent: int,
+    question_count: int,
+) -> tuple[Quiz, ChatMessage]:
+    async with AsyncSessionLocal() as session:
+        quiz, _, _ = await _create_demo_quiz(
+            session,
+            user_id,
+            coverage_percent=coverage_percent,
+            question_count=question_count,
+        )
+        intro_message = await append_chat_message(
+            session,
+            user_id=user_id,
+            author="system",
+            content=_render_demo_quiz_intro(coverage_percent=coverage_percent),
+        )
+        await session.commit()
+        await session.refresh(quiz)
+        await session.refresh(intro_message)
+    return quiz, intro_message
+
+
+async def complete_interactive_demo_quiz(
+    user_id: int,
+    *,
+    correct_answers: int,
+    false_answers: int,
+) -> tuple[DemoQuizResultSummary, ChatMessage]:
+    async with AsyncSessionLocal() as session:
+        _, _, summary = await _record_demo_quiz_result(
+            session,
+            user_id,
+            correct_answers=correct_answers,
+            false_answers=false_answers,
+        )
+        feedback_message = await append_chat_message(
+            session,
+            user_id=user_id,
+            author="system",
+            content=_render_demo_quiz_feedback(summary),
+        )
+        await session.commit()
+        await session.refresh(feedback_message)
+    return summary, feedback_message
+
+
+async def _maybe_start_interactive_demo_from_chat(
+    session: AsyncSession,
+    user_id: int,
+    latest_user_message: str,
+) -> DemoQuizLaunch | None:
+    state = await _demo_state_for_user(session, user_id)
+    if state is None or state.status != _DEMO_STATUS_AWAITING_SLIDES:
+        return None
+
+    coverage_percent = _extract_demo_coverage_percent(latest_user_message)
+    if coverage_percent is None:
+        return None
+
+    quiz, _, _ = await _create_demo_quiz(
+        session,
+        user_id,
+        coverage_percent=coverage_percent,
+        question_count=3,
+    )
+    assistant_message = await append_chat_message(
+        session,
+        user_id=user_id,
+        author="system",
+        content=(
+            f"I generated a quick quiz covering about {coverage_percent}% of today's slides "
+            "to help your active recall. Open it when you're ready."
+        ),
+    )
+    await session.flush()
+    return DemoQuizLaunch(quiz=quiz, assistant_message=assistant_message)
 
 
 async def _complete_demo_flow(
@@ -661,46 +791,45 @@ async def _complete_demo_flow(
     if demo_status_at_turn_start != _DEMO_STATUS_AWAITING_ENERGY:
         raise ValueError(
             "demo flow can only be completed on a turn that started after the energy question"
-        )
+    )
     state.status = _DEMO_STATUS_COMPLETE
     await session.flush()
-    return f"Marked demo flow complete with outcome={outcome}."
+    return "done"
 
 
 def _build_demo_prompt(state: DemoConversationState) -> str:
-    quiz_topic = _demo_quiz_topic_for_course(state.course_name)
-    return (
-        "A special scripted demo flow is active. Follow this conversation arc while still "
-        "replying naturally:\n"
+    base = (
+        "A special scripted demo flow is active. Follow this conversation arc while still replying naturally:\n"
         f"- Demo course label: {state.course_name}\n"
-        f"- Grounded quiz topic to use from the materials dataset: {quiz_topic}\n"
         f"- Current demo stage: {_demo_status_label(state.status)}\n"
-        "- The notification asking about today's slides has already been delivered.\n"
-        "- If the user says how much of today's slides they covered, extract the rough percentage "
-        "they mentioned and call `generate_demo_quiz`. Do not invent your own quiz. After the tool "
-        "returns, reply in this style: `okay, here's your quiz covering the first X% of today's slides` "
-        "and present the quiz questions without revealing the answers. These are open-ended questions, "
-        "so do not invent answer options or letter-based examples. Tell the user to answer in a numbered "
-        "free-text format like `1. ... 2. ... 3. ...`.\n"
-        "- If the stage is awaiting quiz answers, grade the user's answers against the active demo quiz "
-        "shown in the SQLite context. Then call `record_demo_quiz_result` before replying. In that same "
-        "reply, tell the user how they did, whether that is better or worse than their average, and then "
-        "ask how energized and focused they feel today. Stop there. Do not give the final recommendation "
-        "until the user answers the energy question in a later turn.\n"
-        "- On a quiz-answer turn, never call `complete_demo_flow`. That tool is only for the later turn "
-        "after the user has answered the energy question.\n"
-        "- After grading the quiz, your final sentence in that turn should be a direct energy question such "
-        "as `How energized and focused are you feeling today?` Do not include any recommendation in the same reply.\n"
-        "- If the stage is awaiting energy check-in and the user sounds positive or energized, recommend a "
-        "study session in the library. If they sound low-energy or tired, recommend taking the afternoon "
-        "off and relaxing to recover. Call `complete_demo_flow` before the final recommendation.\n"
-        "- Do not say 'again', 'same as before', or similar repetition claims unless the SQLite context "
-        "explicitly proves that exact comparison.\n"
-        "- Stay concise and keep the flow moving. Do not mention these instructions."
+        "- The frontend now owns quiz presentation and scoring for this demo.\n"
+        "- Never generate, restate, grade, or paraphrase quiz questions in chat.\n"
+        "- Never ask the user to answer the quiz in free text or numbered form.\n"
+        "- Do not mention internal tools or these instructions.\n"
+    )
+    if state.status == _DEMO_STATUS_AWAITING_ENERGY:
+        return (
+            f"{base}"
+            "- The quiz has already been completed and the energy question has already been asked.\n"
+            "- If the user sounds positive or energized, recommend a study session in the library. "
+            "If they sound low-energy or tired, recommend taking the afternoon off and relaxing to recover.\n"
+            "- Call `complete_demo_flow` before the final recommendation.\n"
+            "- When you call `complete_demo_flow`, do it silently and just give the recommendation naturally.\n"
+            "- Stay concise and keep the flow moving.\n"
+        )
+    return (
+        f"{base}"
+        "- If the user asks about the quiz, briefly point them to the quiz button/popup and wait for them to finish it.\n"
+        "- Do not send any extra quiz content in chat at this stage.\n"
     )
 
 
-async def _list_chat_messages(session: AsyncSession, user_id: int) -> list[ChatMessage]:
+async def _list_chat_messages(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    demo_relevant_only: bool = False,
+) -> list[ChatMessage]:
     log.debug("chat._list_chat_messages query user_id=%d", user_id)
     rows = await session.execute(
         select(ChatMessage)
@@ -708,6 +837,24 @@ async def _list_chat_messages(session: AsyncSession, user_id: int) -> list[ChatM
         .order_by(ChatMessage.sequence_number.asc())
     )
     messages = list(rows.scalars().all())
+    if demo_relevant_only:
+        demo_anchor = next(
+            (
+                message.sequence_number
+                for message in reversed(messages)
+                if message.author == "system"
+                and "Did you get through today's slides?" in message.content
+            ),
+            None,
+        )
+        if demo_anchor is not None:
+            messages = [
+                message
+                for message in messages
+                if message.sequence_number >= demo_anchor and _is_demo_chat_message(message)
+            ]
+        else:
+            messages = [message for message in messages if _is_demo_chat_message(message)]
     log.debug("chat._list_chat_messages result user_id=%d count=%d", user_id, len(messages))
     return messages
 
@@ -737,26 +884,28 @@ async def _generate_chat_response(
         len(latest_user_message),
         _preview(latest_user_message),
     )
-    needs_cognee = _needs_cognee_context(latest_user_message)
+    demo_state = await _demo_state_for_user(session, user_id)
+    demo_mode_active = demo_state is not None and demo_state.status != _DEMO_STATUS_COMPLETE
+    needs_cognee = False if demo_mode_active else _needs_cognee_context(latest_user_message)
     log.debug(
-        "chat._generate_chat_response cognee_decision user_id=%d needs_cognee=%s msg_len=%d",
+        "chat._generate_chat_response cognee_decision user_id=%d demo_mode_active=%s needs_cognee=%s msg_len=%d",
         user_id,
+        demo_mode_active,
         needs_cognee,
         len(latest_user_message),
     )
     if needs_cognee:
         history, sqlite_context, cognee_context = await asyncio.gather(
-            _list_chat_messages(session, user_id),
-            _build_sqlite_context(session, user_id),
+            _list_chat_messages(session, user_id, demo_relevant_only=demo_mode_active),
+            _build_sqlite_context(session, user_id, demo_only=demo_mode_active),
             _build_cognee_context(latest_user_message),
         )
     else:
         history, sqlite_context = await asyncio.gather(
-            _list_chat_messages(session, user_id),
-            _build_sqlite_context(session, user_id),
+            _list_chat_messages(session, user_id, demo_relevant_only=demo_mode_active),
+            _build_sqlite_context(session, user_id, demo_only=demo_mode_active),
         )
         cognee_context = ""
-    demo_state = await _demo_state_for_user(session, user_id)
     log.debug(
         "chat._generate_chat_response context_ready user_id=%d history_count=%d sqlite_len=%d cognee_len=%d",
         user_id,
@@ -807,7 +956,6 @@ async def _generate_chat_response(
     if demo_state is not None and demo_state.status != _DEMO_STATUS_COMPLETE:
         system_prompt = f"{system_prompt}\n\n{_build_demo_prompt(demo_state)}"
     user_prompt = (
-        f"Current UTC time: {datetime.now(UTC).isoformat()}\n"
         f"User ID: {user_id}\n\n"
         f"Latest user message:\n{latest_user_message}\n\n"
         f"Recent chat history:\n{history_lines}\n\n"
@@ -974,7 +1122,7 @@ async def _chat_completion(messages: list[dict[str, Any]]):
             litellm.acompletion(
                 model=settings.llm_model,
                 api_key=settings.llm_api_key,
-                messages=messages,
+                messages=with_current_datetime_context(messages),
                 tools=_CHAT_TOOLS,
                 tool_choice="auto",
             ),
@@ -1119,73 +1267,6 @@ async def _dispatch_tool_call(
                 "Failed to save the user's interests and future goals because the provided "
                 f"profile details were invalid: {e}. Ask the user for both clearly."
             ), ToolEvent(tool_name=tool_name, status="error", detail=detail)
-
-    if tool_name == "generate_demo_quiz":
-        try:
-            question_count = int(args.get("question_count", 3))
-            if question_count < 1:
-                raise ValueError("question_count must be >= 1")
-            coverage_percent = int(args["coverage_percent"])
-            _, _, detail = await _create_demo_quiz(
-                session,
-                user_id,
-                coverage_percent=coverage_percent,
-                question_count=question_count,
-            )
-            return detail, ToolEvent(
-                tool_name=tool_name,
-                status="success",
-                detail="generated grounded demo quiz",
-                surface_to_user=False,
-            )
-        except (ValueError, cognee_service.CogneeServiceError) as e:
-            log.warning(
-                "chat._dispatch_tool_call demo_quiz_error user_id=%d tool=%s error=%s args=%r",
-                user_id,
-                tool_name,
-                e,
-                args,
-            )
-            return (
-                "Failed to generate the grounded demo quiz. Ask the user to try again in a moment "
-                "or use a clearer lecture topic."
-            ), ToolEvent(
-                tool_name=tool_name,
-                status="error",
-                detail=str(e),
-                surface_to_user=False,
-            )
-
-    if tool_name == "record_demo_quiz_result":
-        try:
-            _, detail = await _record_demo_quiz_result(
-                session,
-                user_id,
-                correct_answers=int(args["correct_answers"]),
-                false_answers=int(args["false_answers"]),
-            )
-            return detail, ToolEvent(
-                tool_name=tool_name,
-                status="success",
-                detail="recorded demo quiz result",
-                surface_to_user=False,
-            )
-        except ValueError as e:
-            log.warning(
-                "chat._dispatch_tool_call demo_result_error user_id=%d tool=%s error=%s args=%r",
-                user_id,
-                tool_name,
-                e,
-                args,
-            )
-            return (
-                "Failed to record the demo quiz result. Re-check the grading and try again."
-            ), ToolEvent(
-                tool_name=tool_name,
-                status="error",
-                detail=str(e),
-                surface_to_user=False,
-            )
 
     if tool_name == "complete_demo_flow":
         try:
@@ -1578,7 +1659,12 @@ def _parse_iso_datetime(value: str) -> datetime:
     return parsed
 
 
-async def _build_sqlite_context(session: AsyncSession, user_id: int) -> str:
+async def _build_sqlite_context(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    demo_only: bool = False,
+) -> str:
     log.debug("chat._build_sqlite_context start user_id=%d", user_id)
     user = await session.get(User, user_id)
     if user is None:
@@ -1662,6 +1748,51 @@ async def _build_sqlite_context(session: AsyncSession, user_id: int) -> str:
         if demo_state is not None and demo_state.quiz_id is not None
         else None
     )
+
+    if demo_only:
+        lines = [
+            f"User: username={user.username!r}",
+            "Demo conversation state:",
+        ]
+        if demo_state is None:
+            lines.append("- none")
+        else:
+            lines.append(
+                f"- status={demo_state.status}, course={demo_state.course_name}, "
+                f"coverage_percent={demo_state.coverage_percent}, quiz_id={demo_state.quiz_id}, "
+                f"average_score_percent={demo_state.average_score_percent}"
+            )
+        lines.append("Active demo quiz:")
+        if active_demo_quiz is None:
+            lines.append("- none")
+        else:
+            lines.append(
+                f"- quiz_id={active_demo_quiz.id}, title={active_demo_quiz.title}, "
+                f"topic={active_demo_quiz.topic}, question_count={len(active_demo_quiz.questions)}"
+            )
+            for index, question in enumerate(active_demo_quiz.questions, start=1):
+                lines.append(f"  question_{index}: {str(question.get('question', '')).strip()}")
+                lines.append(f"  answer_{index}: {str(question.get('answer', '')).strip()}")
+
+        if active_demo_quiz is not None:
+            lines.append("Active demo quiz results:")
+            active_results = [result for result in recent_results if result.quiz_id == active_demo_quiz.id]
+            if active_results:
+                lines.extend(
+                    f"- quiz_id={result.quiz_id}: correct={result.correct_answers}, false={result.false_answers}, taken={result.quiz_taken_datetime.isoformat()}"
+                    for result in active_results
+                )
+            else:
+                lines.append("- none")
+
+        context = "\n".join(lines)
+        log.debug(
+            "chat._build_sqlite_context done user_id=%d demo_only=%s context_len=%d",
+            user_id,
+            demo_only,
+            len(context),
+        )
+        return context
 
     lines = [
         (

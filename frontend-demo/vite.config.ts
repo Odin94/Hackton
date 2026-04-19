@@ -11,6 +11,7 @@ export default defineConfig({
       '/signup': 'http://127.0.0.1:8000',
       '/chat': 'http://127.0.0.1:8000',
       '/demo': 'http://127.0.0.1:8000',
+      '/events': 'http://127.0.0.1:8000',
       '/diary': 'http://127.0.0.1:8000',
       '/materials': 'http://127.0.0.1:8000',
       '/cognify': 'http://127.0.0.1:8000',

@@ -25,6 +25,7 @@ import litellm
 from cognee.api.v1.search import SearchType
 
 from app.config import settings  # must import before cognee to normalize env
+from app.llm_context import with_current_datetime_context
 from app.types import DiaryEntry, Material, QuizItem
 
 log = logging.getLogger(__name__)
@@ -509,10 +510,10 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
             litellm.acompletion(
                 model=settings.llm_model,
                 api_key=settings.llm_api_key,
-                messages=[
+                messages=with_current_datetime_context([
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
-                ],
+                ]),
                 tools=[_QUIZ_TOOL],
                 tool_choice=_QUIZ_TOOL_CHOICE,
             ),

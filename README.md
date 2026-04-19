@@ -26,7 +26,7 @@ Either run with [mprocs](https://github.com/pvolok/mprocs), [oprocs](https://git
 ### Backend
 ```bash
 cd backend
-uv sync  # install dependencies
+uv sync --all-groups  # install dependencies
 uv run uvicorn main:app --reload
 ```
 

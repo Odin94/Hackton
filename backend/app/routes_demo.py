@@ -18,7 +18,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from sqlalchemy import func, select
@@ -29,6 +29,7 @@ from app.api_auth import require_bearer_user_id
 from app.chat_models import ChatMessageResp, to_chat_message_resp
 from app.chat_service import append_chat_message, serialize_chat_message
 from app.connection_manager import manager
+from app.types import QuizItem
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +67,82 @@ class SystemMessageResp(BaseModel):
 class QuizResultResp(BaseModel):
     quiz_id: int
     quiz_result_id: int
+
+
+class QuizSummaryResp(BaseModel):
+    id: int
+    title: str
+    topic: str
+    course_name: str | None = None
+    estimated_duration_minutes: int
+    created_at: str
+    question_count: int
+    attempt_count: int
+    average_percent: int | None = None
+    best_percent: int | None = None
+    latest_percent: int | None = None
+    overall_average_percent: int
+    underperformed: bool
+    questions: list[QuizItem]
+
+
+class QuizLibraryResp(BaseModel):
+    overall_average_percent: int
+    quizzes: list[QuizSummaryResp]
+
+
+class RetakeQuizReq(BaseModel):
+    correct_answers: int = Field(ge=0)
+    false_answers: int = Field(ge=0)
+
+
+class RetakeQuizResp(BaseModel):
+    quiz_id: int
+    quiz_result_id: int
+    latest_percent: int
+    average_percent: int
+    attempt_count: int
+
+
+def _normalize_quiz_question(
+    question: Any,
+    *,
+    fallback_topic: str,
+    fallback_source_ref: str | None,
+) -> QuizItem:
+    raw = question if isinstance(question, dict) else {}
+    raw_options = raw.get("options")
+    options = (
+        list(raw_options[:4])
+        if isinstance(raw_options, list) and len(raw_options) >= 4
+        else [
+            "Option A",
+            "Option B",
+            "Option C",
+            "Option D",
+        ]
+    )
+    while len(options) < 4:
+        options.append(f"Option {chr(65 + len(options))}")
+
+    try:
+        correct_index = int(raw.get("correct_index", 0))
+    except (TypeError, ValueError):
+        correct_index = 0
+    correct_index = max(0, min(3, correct_index))
+
+    return QuizItem(
+        question=str(raw.get("question") or "Untitled question"),
+        answer=str(raw.get("answer") or "Review the lecture materials for the rationale."),
+        options=[str(option) for option in options[:4]],
+        correct_index=correct_index,
+        topic=str(raw.get("topic") or fallback_topic),
+        source_ref=(
+            str(raw.get("source_ref"))
+            if raw.get("source_ref") is not None
+            else fallback_source_ref
+        ),
+    )
 
 
 async def _push_chat_message(user_id: int, message) -> None:
@@ -216,7 +293,7 @@ class OverviewResp(BaseModel):
 async def get_demo_overview(
     authorization: str | None = Header(default=None),
 ) -> OverviewResp:
-    user_id = _require_user_id(authorization)
+    user_id = require_bearer_user_id(authorization)
     now = datetime.now(UTC)
     async with AsyncSessionLocal() as session:
         course_rows = (
@@ -290,4 +367,143 @@ async def get_demo_overview(
             for d in deadline_rows
         ],
         quiz=OverviewQuizStat(total_taken=taken, average_percent=pct),
+    )
+
+
+@router.get(
+    "/demo/quizzes",
+    response_model=QuizLibraryResp,
+    summary="List all quizzes for the user with performance stats",
+)
+async def get_demo_quizzes(
+    authorization: str | None = Header(default=None),
+) -> QuizLibraryResp:
+    user_id = require_bearer_user_id(authorization)
+    async with AsyncSessionLocal() as session:
+        quiz_rows = (
+            await session.execute(
+                select(Quiz).where(Quiz.user_id == user_id).order_by(Quiz.created_at.desc(), Quiz.id.desc())
+            )
+        ).scalars().all()
+        result_rows = (
+            await session.execute(
+                select(QuizResult)
+                .where(QuizResult.user_id == user_id)
+                .order_by(QuizResult.quiz_taken_datetime.desc(), QuizResult.id.desc())
+            )
+        ).scalars().all()
+        course_rows = (
+            await session.execute(select(Course).where(Course.user_id == user_id))
+        ).scalars().all()
+
+    course_by_id = {course.id: course.name for course in course_rows}
+    results_by_quiz: dict[int, list[QuizResult]] = {}
+    overall_correct = 0
+    overall_wrong = 0
+    for result in result_rows:
+        results_by_quiz.setdefault(result.quiz_id, []).append(result)
+        overall_correct += result.correct_answers
+        overall_wrong += result.false_answers
+
+    overall_attempted = overall_correct + overall_wrong
+    overall_average_percent = round(100 * overall_correct / overall_attempted) if overall_attempted else 0
+
+    quizzes: list[QuizSummaryResp] = []
+    for quiz in quiz_rows:
+        attempts = results_by_quiz.get(quiz.id, [])
+        scores = [
+            round(100 * result.correct_answers / (result.correct_answers + result.false_answers))
+            for result in attempts
+            if (result.correct_answers + result.false_answers) > 0
+        ]
+        course_name = course_by_id.get(quiz.course_id) if quiz.course_id is not None else None
+        normalized_questions = [
+            _normalize_quiz_question(
+                question,
+                fallback_topic=quiz.topic,
+                fallback_source_ref=course_name or quiz.topic,
+            )
+            for question in quiz.questions
+        ]
+        average_percent = round(sum(scores) / len(scores)) if scores else None
+        best_percent = max(scores) if scores else None
+        latest_percent = scores[0] if scores else None
+        underperformed = average_percent is not None and average_percent < overall_average_percent
+        quizzes.append(
+            QuizSummaryResp(
+                id=quiz.id,
+                title=quiz.title,
+                topic=quiz.topic,
+                course_name=course_name,
+                estimated_duration_minutes=quiz.estimated_duration_minutes,
+                created_at=quiz.created_at.isoformat(),
+                question_count=len(normalized_questions),
+                attempt_count=len(scores),
+                average_percent=average_percent,
+                best_percent=best_percent,
+                latest_percent=latest_percent,
+                overall_average_percent=overall_average_percent,
+                underperformed=underperformed,
+                questions=normalized_questions,
+            )
+        )
+
+    return QuizLibraryResp(
+        overall_average_percent=overall_average_percent,
+        quizzes=quizzes,
+    )
+
+
+@router.post(
+    "/demo/quizzes/{quiz_id}/retake",
+    response_model=RetakeQuizResp,
+    summary="Store a retake result for an existing quiz",
+)
+async def post_demo_quiz_retake(
+    quiz_id: int,
+    req: RetakeQuizReq,
+    authorization: str | None = Header(default=None),
+) -> RetakeQuizResp:
+    user_id = require_bearer_user_id(authorization)
+    total_answers = req.correct_answers + req.false_answers
+    if total_answers < 1:
+        raise HTTPException(status_code=400, detail="retake result must contain at least one graded answer")
+
+    async with AsyncSessionLocal() as session:
+        quiz = await session.get(Quiz, quiz_id)
+        if quiz is None or quiz.user_id != user_id:
+            raise HTTPException(status_code=404, detail="quiz not found for user")
+
+        result = QuizResult(
+            user_id=user_id,
+            quiz_id=quiz.id,
+            correct_answers=req.correct_answers,
+            false_answers=req.false_answers,
+            quiz_taken_datetime=datetime.now(UTC),
+        )
+        session.add(result)
+        await session.flush()
+
+        result_rows = (
+            await session.execute(
+                select(QuizResult)
+                .where(QuizResult.user_id == user_id, QuizResult.quiz_id == quiz.id)
+                .order_by(QuizResult.quiz_taken_datetime.desc(), QuizResult.id.desc())
+            )
+        ).scalars().all()
+        await session.commit()
+
+    scores = [
+        round(100 * item.correct_answers / (item.correct_answers + item.false_answers))
+        for item in result_rows
+        if (item.correct_answers + item.false_answers) > 0
+    ]
+    latest_percent = scores[0]
+    average_percent = round(sum(scores) / len(scores))
+    return RetakeQuizResp(
+        quiz_id=quiz_id,
+        quiz_result_id=result.id,
+        latest_percent=latest_percent,
+        average_percent=average_percent,
+        attempt_count=len(scores),
     )

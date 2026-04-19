@@ -12,7 +12,7 @@ import {
   type DemoQuizQuestion,
 } from './demoContent'
 
-type Page = 'login' | 'signup' | 'recommended' | 'chat' | 'demo'
+type Page = 'login' | 'signup' | 'recommended' | 'recreational' | 'quizzes' | 'chat' | 'demo'
 
 type AuthResponse = {
   token: string
@@ -24,7 +24,7 @@ type ChatMessage = {
   id: number
   user_id: number
   timestamp: string
-  author: 'user' | 'TumTum'
+  author: 'user' | 'TumTum' | 'system'
   sequence_number: number
   content: string
   processing_ms?: number | null
@@ -32,6 +32,29 @@ type ChatMessage = {
 
 type ChatReplyResponse = {
   user_message: ChatMessage
+  assistant_message: ChatMessage
+  demo_quiz?: {
+    title: string
+    topic: string
+    questions: DemoQuizApiQuestion[]
+    assistant_message: ChatMessage
+  } | null
+}
+
+type DemoTriggerResponse = {
+  notification_message?: ChatMessage | null
+}
+
+type DemoQuizApiQuestion = {
+  question: string
+  answer: string
+  options: [string, string, string, string]
+  correct_index: number
+  topic: string
+  source_ref: string | null
+}
+
+type DemoQuizCompleteResponse = {
   assistant_message: ChatMessage
 }
 
@@ -69,17 +92,93 @@ type OverviewResp = {
   quiz: OverviewQuizStat
 }
 
+type StoredQuizQuestion = {
+  question: string
+  answer: string
+  options: [string, string, string, string]
+  correct_index: number
+  topic: string
+  source_ref: string | null
+}
+
+type QuizLibraryItem = {
+  id: number
+  title: string
+  topic: string
+  course_name: string | null
+  estimated_duration_minutes: number
+  created_at: string
+  question_count: number
+  attempt_count: number
+  average_percent: number | null
+  best_percent: number | null
+  latest_percent: number | null
+  overall_average_percent: number
+  underperformed: boolean
+  questions: StoredQuizQuestion[]
+}
+
+type QuizLibraryResponse = {
+  overall_average_percent: number
+  quizzes: QuizLibraryItem[]
+}
+
+type RetakeQuizResponse = {
+  quiz_id: number
+  quiz_result_id: number
+  latest_percent: number
+  average_percent: number
+  attempt_count: number
+}
+
+type QuizFlowMode = 'scripted-demo' | 'lecture-demo' | 'quiz-library'
+
+type MessageQuizAttachment = {
+  messageId: number
+  title: string
+  topic: string
+  questions: DemoQuizQuestion[]
+  isLive: boolean
+  autoPlay: boolean
+  mode: Exclude<QuizFlowMode, 'quiz-library'>
+  status: 'ready' | 'completed'
+}
+
 type RecommendedItem = {
   id: string
   kind: 'event' | 'deadline'
   title: string
   course: string
+  timestamp: string
   primaryTime: string
   secondaryTime?: string
   badge: string
   tone: 'accent' | 'success' | 'danger'
   reason: string
 }
+
+type RecommendedDayGroup = {
+  id: string
+  label: string
+  deadlines: RecommendedItem[]
+  events: RecommendedItem[]
+}
+
+type DiscoveredEvent = {
+  id: number
+  title: string
+  description: string
+  url: string | null
+  location: string | null
+  event_date: string | null
+  signup_deadline: string | null
+  category: string
+  score: number
+  score_reasoning: string | null
+  notified: boolean
+}
+
+type EventListResponse = { events: DiscoveredEvent[] }
 
 const TOKEN_KEY = 'tumtum-demo-token'
 const USERNAME_KEY = 'tumtum-demo-username'
@@ -101,12 +200,29 @@ const SCENE_D_QUIZ_TOPIC = 'powerset construction NFA DFA epsilon closures'
 
 const PAGE_LABELS: Partial<Record<Page, string>> = {
   recommended: 'Recommended events',
+  recreational: 'Recommended recreational events',
+  quizzes: 'Quiz library',
   chat: 'Chat',
   demo: 'Demo chat',
 }
 
+const CATEGORY_COLORS: Record<string, string> = {
+  career: '#1a6b4a',
+  networking: '#284d4b',
+  fun: '#b85c00',
+  other: '#5a4f45',
+}
+
 function typingDurationMs(text: string): number {
   return Math.max(600, text.length * TYPING_MS_PER_CHAR)
+}
+
+function logStatusError(message: string, error?: unknown) {
+  if (error) {
+    console.error(message, error)
+    return
+  }
+  console.error(message)
 }
 
 async function liveOrFallback<T>(
@@ -191,7 +307,7 @@ function App() {
   const [signupName, setSignupName] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [draft, setDraft] = useState('')
-  const [status, setStatus] = useState(
+  const [, setStatus] = useState(
     token
       ? 'Signed in. Open Recommended events to review what is next.'
       : 'Log in with an existing username or create a new account.',
@@ -204,15 +320,27 @@ function App() {
   const [isSending, setIsSending] = useState(false)
   const [pendingUserMessageId, setPendingUserMessageId] = useState<number | null>(null)
   const [isAutoRunning, setIsAutoRunning] = useState(false)
+  const [isTriggeringBackendDemo, setIsTriggeringBackendDemo] = useState(false)
   const [quizOpen, setQuizOpen] = useState(false)
   const [quizAutoPlay, setQuizAutoPlay] = useState(false)
+  const [quizMode, setQuizMode] = useState<QuizFlowMode>('scripted-demo')
   const [overview, setOverview] = useState<OverviewResp | null>(null)
+  const [quizLibrary, setQuizLibrary] = useState<QuizLibraryResponse | null>(null)
+  const [isLoadingQuizLibrary, setIsLoadingQuizLibrary] = useState(false)
+  const [quizLibraryError, setQuizLibraryError] = useState('')
+  const [activeRetakeQuizId, setActiveRetakeQuizId] = useState<number | null>(null)
+  const [discoveredEvents, setDiscoveredEvents] = useState<DiscoveredEvent[]>([])
+  const [isLoadingDiscoveredEvents, setIsLoadingDiscoveredEvents] = useState(false)
+  const [isScanningDiscoveredEvents] = useState(false)
+  const [discoveredEventsError, setDiscoveredEventsError] = useState('')
   const [activeQuiz, setActiveQuiz] = useState<{
     title: string
     topic: string
     questions: DemoQuizQuestion[]
   }>(FALLBACK_QUIZ)
   const [activeQuizIsLive, setActiveQuizIsLive] = useState(false)
+  const [activeQuizMessageId, setActiveQuizMessageId] = useState<number | null>(null)
+  const [messageQuizzes, setMessageQuizzes] = useState<MessageQuizAttachment[]>([])
   const listRef = useRef<HTMLDivElement | null>(null)
   const quizDoneResolverRef = useRef<(() => void) | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
@@ -233,7 +361,12 @@ function App() {
     } else {
       localStorage.removeItem(TOKEN_KEY)
       setOverview(null)
+      setQuizLibrary(null)
+      setQuizLibraryError('')
+      setDiscoveredEvents([])
+      setDiscoveredEventsError('')
       setMessages([])
+      setMessageQuizzes([])
       setDraft('')
       animatedIdsRef.current.clear()
     }
@@ -260,7 +393,7 @@ function App() {
       setPage('recommended')
       return
     }
-    if (!token && (page === 'recommended' || page === 'chat' || page === 'demo')) {
+    if (!token && (page === 'recommended' || page === 'recreational' || page === 'quizzes' || page === 'chat' || page === 'demo')) {
       setPage('login')
     }
   }, [page, token])
@@ -280,6 +413,7 @@ function App() {
       const body = (await response.json()) as OverviewResp
       setOverview(body)
     } catch (err) {
+      logStatusError(`Could not refresh recommendations: ${toMessage(err)}`, err)
       setStatus(`Could not refresh recommendations: ${toMessage(err)}`)
     } finally {
       setIsLoadingOverview(false)
@@ -292,6 +426,8 @@ function App() {
     }
     void loadHistory(token)
     void refreshOverview()
+    void loadQuizLibrary(token)
+    void loadDiscoveredEvents(token)
   }, [token, refreshOverview])
 
   useEffect(() => {
@@ -336,6 +472,7 @@ function App() {
     })
 
     socket.addEventListener('error', () => {
+      logStatusError('WebSocket error')
       setStatus('WebSocket error')
     })
 
@@ -363,9 +500,54 @@ function App() {
     } catch (err) {
       setToken('')
       setAuthError(toMessage(err))
+      logStatusError('Your saved session expired. Please log in again.', err)
       setStatus('Your saved session expired. Please log in again.')
     } finally {
       setIsLoadingHistory(false)
+    }
+  }
+
+  async function loadDiscoveredEvents(activeToken = token) {
+    if (!activeToken) {
+      return
+    }
+    setIsLoadingDiscoveredEvents(true)
+    setDiscoveredEventsError('')
+    try {
+      const response = await fetch('/events/', {
+        headers: { Authorization: `Bearer ${activeToken}` },
+      })
+      if (!response.ok) {
+        throw new Error(await readError(response, 'Could not load recreational events.'))
+      }
+      const body = (await response.json()) as EventListResponse
+      setDiscoveredEvents(body.events)
+    } catch (err) {
+      setDiscoveredEventsError(toMessage(err))
+    } finally {
+      setIsLoadingDiscoveredEvents(false)
+    }
+  }
+
+  async function loadQuizLibrary(activeToken = token) {
+    if (!activeToken) {
+      return
+    }
+    setIsLoadingQuizLibrary(true)
+    setQuizLibraryError('')
+    try {
+      const response = await fetch('/demo/quizzes', {
+        headers: { Authorization: `Bearer ${activeToken}` },
+      })
+      if (!response.ok) {
+        throw new Error(await readError(response, 'Could not load quizzes.'))
+      }
+      const body = (await response.json()) as QuizLibraryResponse
+      setQuizLibrary(body)
+    } catch (err) {
+      setQuizLibraryError(toMessage(err))
+    } finally {
+      setIsLoadingQuizLibrary(false)
     }
   }
 
@@ -400,6 +582,7 @@ function App() {
       applyAuth(body, `Logged in as ${body.username}.`)
     } catch (err) {
       setAuthError(toMessage(err))
+      logStatusError('Could not log in.', err)
       setStatus('Could not log in.')
     } finally {
       setIsLoggingIn(false)
@@ -430,6 +613,7 @@ function App() {
       applyAuth(body, `Welcome, ${body.username}. Your account is ready.`)
     } catch (err) {
       setAuthError(toMessage(err))
+      logStatusError('Could not sign up.', err)
       setStatus('Could not sign up.')
     } finally {
       setIsSigningUp(false)
@@ -502,6 +686,50 @@ function App() {
     })
   }
 
+  function attachQuizToMessage(attachment: MessageQuizAttachment) {
+    setMessageQuizzes((current) => {
+      const next = current.filter((item) => item.messageId !== attachment.messageId)
+      next.push(attachment)
+      return next
+    })
+  }
+
+  function openMessageQuiz(attachment: MessageQuizAttachment) {
+    setActiveQuizMessageId(attachment.messageId)
+    setActiveQuiz({
+      title: attachment.title,
+      topic: attachment.topic,
+      questions: attachment.questions,
+    })
+    setActiveQuizIsLive(attachment.isLive)
+    setQuizMode(attachment.mode)
+    setQuizAutoPlay(attachment.autoPlay)
+    setQuizOpen(true)
+  }
+
+  function renderMessageQuizAction(messageId: number) {
+    const attachment = messageQuizzes.find((item) => item.messageId === messageId)
+    if (!attachment) {
+      return null
+    }
+    return (
+      <div className="message-quiz-action">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => openMessageQuiz(attachment)}
+          disabled={attachment.status === 'completed'}
+        >
+          {attachment.status === 'completed' ? 'Quiz completed' : 'Open quiz'}
+        </Button>
+        <span className="message-quiz-caption">
+          {attachment.questions.length} questions
+        </span>
+      </div>
+    )
+  }
+
   async function runFullDemo() {
     if (!token || isAutoRunning) {
       return
@@ -546,8 +774,10 @@ function App() {
         'scene-bc',
       )
       setIsSending(false)
+      let quizMessageId: number | null = null
 
       if (liveBody && liveBody.assistant_message?.content) {
+        quizMessageId = liveBody.assistant_message.id
         setMessages((current) =>
           current.some((message) => message.id === liveBody.assistant_message.id)
             ? current
@@ -566,6 +796,7 @@ function App() {
           sequence_number: 0,
           content: SCENE_C_REPLY,
         }
+        quizMessageId = fallbackReply.id
         setMessages((current) => [...current, fallbackReply])
         await sleep(typingDurationMs(SCENE_C_REPLY) + POST_BUBBLE_BREATH_MS)
       }
@@ -583,15 +814,23 @@ function App() {
             questions: resolvedQuiz,
           }
         : FALLBACK_QUIZ
-      setActiveQuiz(nextQuiz)
-      setActiveQuizIsLive(resolvedQuiz != null)
       setStatus(
         resolvedQuiz
           ? 'Scene D · LIVE cognee quiz — powerset drill'
           : 'Scene D · scripted fallback — cognee unreachable',
       )
-      setQuizAutoPlay(true)
-      setQuizOpen(true)
+      if (quizMessageId != null) {
+        attachQuizToMessage({
+          messageId: quizMessageId,
+          title: nextQuiz.title,
+          topic: nextQuiz.topic,
+          questions: nextQuiz.questions,
+          isLive: resolvedQuiz != null,
+          autoPlay: true,
+          mode: 'scripted-demo',
+          status: 'ready',
+        })
+      }
       const quizDone = new Promise<void>((resolve) => {
         quizDoneResolverRef.current = resolve
       })
@@ -640,6 +879,7 @@ function App() {
       setStatus('Demo complete.')
       void refreshOverview()
     } catch (err) {
+      logStatusError(`Demo run failed: ${toMessage(err)}`, err)
       setStatus(`Demo run failed: ${toMessage(err)}`)
     } finally {
       setIsAutoRunning(false)
@@ -689,10 +929,31 @@ function App() {
         }
         return next
       })
-      setStatus('Live LLM reply delivered.')
+      if (body.demo_quiz) {
+        attachQuizToMessage({
+          messageId: body.assistant_message.id,
+          title: body.demo_quiz.title,
+          topic: body.demo_quiz.topic,
+          questions: body.demo_quiz.questions.map((question) => ({
+            question: question.question,
+            options: question.options,
+            correct_index: question.correct_index,
+            explanation: question.answer || 'Grounded in the course materials.',
+            source_ref: question.source_ref ?? 'Lecture materials',
+          })),
+          isLive: true,
+          autoPlay: false,
+          mode: 'lecture-demo',
+          status: 'ready',
+        })
+        setStatus('Lecture quiz ready.')
+      } else {
+        setStatus('Live LLM reply delivered.')
+      }
     } catch (err) {
       setMessages((current) => current.filter((message) => message.id !== tempUserMessage.id))
       setDraft(outgoing)
+      logStatusError(`Send failed: ${toMessage(err)}`, err)
       setStatus(`Send failed: ${toMessage(err)}`)
     } finally {
       setIsSending(false)
@@ -700,20 +961,146 @@ function App() {
     }
   }
 
+  async function handleDemoTrigger() {
+    if (!token || isTriggeringBackendDemo) {
+      return
+    }
+    setIsTriggeringBackendDemo(true)
+    setStatus('Simulating lecture ending...')
+    try {
+      const response = await fetch('/chat/demo-trigger', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ course_name: 'Machine Learning' }),
+      })
+      if (!response.ok) {
+        throw new Error(await readError(response, 'Could not start the backend demo.'))
+      }
+      const body = (await response.json()) as DemoTriggerResponse
+      if (body.notification_message) {
+        setMessages((current) =>
+          current.some((message) => message.id === body.notification_message!.id)
+            ? current
+            : [...current, body.notification_message!],
+        )
+      }
+      setStatus('Lecture prompt delivered.')
+    } catch (err) {
+      logStatusError(`Could not start the backend demo: ${toMessage(err)}`, err)
+      setStatus(`Could not start the backend demo: ${toMessage(err)}`)
+    } finally {
+      setIsTriggeringBackendDemo(false)
+    }
+  }
+
+  function handleRetakeQuiz(quiz: QuizLibraryItem) {
+    setActiveRetakeQuizId(quiz.id)
+    setActiveQuiz({
+      title: quiz.title,
+      topic: quiz.topic,
+      questions: quiz.questions.map((question) => ({
+        question: question.question,
+        options: question.options,
+        correct_index: question.correct_index,
+        explanation: question.answer || 'Grounded in the course materials.',
+        source_ref: question.source_ref ?? 'Lecture materials',
+      })),
+    })
+    setActiveQuizIsLive(true)
+    setActiveQuizMessageId(null)
+    setQuizMode('quiz-library')
+    setQuizAutoPlay(false)
+    setQuizOpen(true)
+    setStatus(`Retaking ${quiz.title}...`)
+  }
+
   const handleQuizComplete = useCallback(
     async (answers: number[]) => {
       setQuizOpen(false)
       setQuizAutoPlay(false)
+      if (activeQuizMessageId != null) {
+        setMessageQuizzes((current) =>
+          current.map((item) =>
+            item.messageId === activeQuizMessageId ? { ...item, status: 'completed' } : item,
+          ),
+        )
+      }
+      setActiveQuizMessageId(null)
       const correctCount = answers.reduce(
         (acc, choice, idx) =>
           acc + (choice === activeQuiz.questions[idx].correct_index ? 1 : 0),
         0,
       )
+      if (quizMode === 'lecture-demo') {
+        try {
+          const response = await fetch('/chat/demo-quiz/complete', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              correct_answers: correctCount,
+              false_answers: answers.length - correctCount,
+            }),
+          })
+          if (!response.ok) {
+            throw new Error(await readError(response, 'Could not save the lecture quiz.'))
+          }
+          const body = (await response.json()) as DemoQuizCompleteResponse
+          setMessages((current) =>
+            current.some((message) => message.id === body.assistant_message.id)
+              ? current
+              : [...current, body.assistant_message],
+          )
+          setStatus(`Lecture quiz saved: ${correctCount}/${answers.length}`)
+          void Promise.all([refreshOverview(), loadQuizLibrary(token)])
+        } catch (err) {
+          logStatusError(`Lecture quiz save failed: ${toMessage(err)}`, err)
+          setStatus(`Lecture quiz save failed: ${toMessage(err)}`)
+        }
+        return
+      }
+      if (quizMode === 'quiz-library') {
+        if (activeRetakeQuizId == null || !token) {
+          setStatus('Could not save the retake result.')
+          return
+        }
+        try {
+          const response = await fetch(`/demo/quizzes/${activeRetakeQuizId}/retake`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              correct_answers: correctCount,
+              false_answers: answers.length - correctCount,
+            }),
+          })
+          if (!response.ok) {
+            throw new Error(await readError(response, 'Could not save the retake result.'))
+          }
+          await response.json() as Promise<RetakeQuizResponse>
+          setStatus(`Retake saved: ${correctCount}/${answers.length}`)
+          void Promise.all([refreshOverview(), loadQuizLibrary(token)])
+        } catch (err) {
+          logStatusError(`Retake save failed: ${toMessage(err)}`, err)
+          setStatus(`Retake save failed: ${toMessage(err)}`)
+        } finally {
+          setActiveRetakeQuizId(null)
+        }
+        return
+      }
       try {
         await saveQuizResults(activeQuiz, correctCount, answers.length)
         setStatus(`Quiz saved: ${correctCount}/${answers.length}`)
-        void refreshOverview()
+        void Promise.all([refreshOverview(), loadQuizLibrary(token)])
       } catch (err) {
+        logStatusError(`Quiz save failed: ${toMessage(err)}`, err)
         setStatus(`Quiz save failed: ${toMessage(err)}`)
       }
       await sleep(700)
@@ -722,16 +1109,15 @@ function App() {
           `${SCENE_E_RECAP_PREFIX}${correctCount}/${answers.length} on the powerset drill.${SCENE_E_RECAP_BODY}`,
         )
       } catch (err) {
+        logStatusError(`Scene E recap failed: ${toMessage(err)}`, err)
         setStatus(`Scene E recap failed: ${toMessage(err)}`)
       }
       const resolver = quizDoneResolverRef.current
       quizDoneResolverRef.current = null
       resolver?.()
     },
-    [activeQuiz, refreshOverview],
+    [activeQuiz, activeQuizMessageId, activeRetakeQuizId, quizMode, refreshOverview, token],
   )
-
-  const recommendedItems = buildRecommendations(overview)
 
   return (
     <div className="app-shell">
@@ -748,10 +1134,11 @@ function App() {
         <MainHeader
           page={page}
           username={username}
-          status={status}
           isAuthenticated={Boolean(token)}
           isBusy={isAutoRunning}
+          isTriggeringBackendDemo={isTriggeringBackendDemo}
           onPlayDemo={() => void runFullDemo()}
+          onTriggerBackendDemo={() => void handleDemoTrigger()}
           onNavigate={setPage}
         />
 
@@ -801,11 +1188,31 @@ function App() {
 
         {page === 'recommended' ? (
           <RecommendedEventsPage
-            username={username}
             isAuthenticated={Boolean(token)}
             isLoading={isLoadingOverview}
             overview={overview}
-            items={recommendedItems}
+            onNavigate={setPage}
+          />
+        ) : null}
+
+        {page === 'recreational' ? (
+          <RecreationalEventsPage
+            isAuthenticated={Boolean(token)}
+            discoveredEvents={discoveredEvents}
+            isLoadingDiscoveredEvents={isLoadingDiscoveredEvents}
+            isScanningDiscoveredEvents={isScanningDiscoveredEvents}
+            discoveredEventsError={discoveredEventsError}
+            onNavigate={setPage}
+          />
+        ) : null}
+
+        {page === 'quizzes' ? (
+          <QuizLibraryPage
+            isAuthenticated={Boolean(token)}
+            quizLibrary={quizLibrary}
+            isLoading={isLoadingQuizLibrary}
+            error={quizLibraryError}
+            onRetake={handleRetakeQuiz}
             onNavigate={setPage}
           />
         ) : null}
@@ -843,6 +1250,7 @@ function App() {
                       </span>
                     </div>
                     <p>{displayMessageContent(message.content)}</p>
+                    {renderMessageQuizAction(message.id)}
                   </article>
                 ))
               )}
@@ -870,15 +1278,11 @@ function App() {
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 placeholder="Ask about your study notes, diary, quizzes, or schedules..."
-                rows={4}
+                rows={1}
                 disabled={!token || isSending}
               />
               <div className="composer-actions">
-                <p className="helper-text">
-                  {token
-                    ? 'Each send stores your message and the backend reply.'
-                    : 'Log in first to enable sending.'}
-                </p>
+                <p></p>
                 <button type="submit" disabled={!token || isSending || !draft.trim()}>
                   {isSending ? 'Sending...' : 'Send'}
                 </button>
@@ -928,6 +1332,7 @@ function App() {
                       shouldAnimate={!animatedIdsRef.current.has(message.id)}
                       onDone={() => animatedIdsRef.current.add(message.id)}
                     />
+                    {renderMessageQuizAction(message.id)}
                   </article>
                 ))
               )}
@@ -955,18 +1360,18 @@ function App() {
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault()
-                    void handleSend(event as unknown as FormEvent<HTMLFormElement>)
-                  }
+                  if (event.key !== 'Enter') return
+                  if (event.metaKey || event.ctrlKey) return
+                  event.preventDefault()
+                  void handleSend(event as unknown as FormEvent<HTMLFormElement>)
                 }}
                 placeholder="Write a message..."
-                rows={3}
+                rows={1}
                 disabled={!token || isSending || isAutoRunning}
               />
               <div className="composer-actions">
                 <p className="helper-text">
-                  Press ▶ Play demo for the full scripted 7-scene run.
+                  Use Run backend demo for the guided backend flow, or ▶ Play demo for the full scripted 7-scene run.
                 </p>
                 <button
                   type="submit"
@@ -989,6 +1394,8 @@ function App() {
           onClose={() => {
             setQuizOpen(false)
             setQuizAutoPlay(false)
+            setActiveQuizMessageId(null)
+            setActiveRetakeQuizId(null)
           }}
           onComplete={handleQuizComplete}
         />
@@ -1000,40 +1407,60 @@ function App() {
 function MainHeader({
   page,
   username,
-  status,
   isAuthenticated,
   isBusy,
+  isTriggeringBackendDemo,
   onPlayDemo,
+  onTriggerBackendDemo,
   onNavigate,
 }: {
   page: Page
   username: string
-  status: string
   isAuthenticated: boolean
   isBusy: boolean
+  isTriggeringBackendDemo: boolean
   onPlayDemo: () => void
+  onTriggerBackendDemo: () => void
   onNavigate: (page: Page) => void
 }) {
   return (
     <header className="demo-header">
       <div>
-        <p className="eyebrow">TumTum · Frontend demo</p>
+        <p className="eyebrow">TumTum · Study Coach</p>
         <h1>{PAGE_LABELS[page]}</h1>
       </div>
       <div className="status-pill" aria-live="polite">
+        {(page === 'chat' || page === 'demo') && isAuthenticated ? (
+          <button
+            type="button"
+            className="play-button"
+            onClick={onTriggerBackendDemo}
+            disabled={isTriggeringBackendDemo}
+          >
+            {isTriggeringBackendDemo ? 'Simulate Lecture Ending' : 'Simulate Lecture Ending'}
+          </button>
+        ) : null}
         {page === 'demo' && isAuthenticated ? (
           <button type="button" className="play-button" onClick={onPlayDemo} disabled={isBusy}>
             {isBusy ? '▸ Running demo...' : '▶ Play demo'}
           </button>
         ) : null}
         {page === 'recommended' && isAuthenticated ? (
+          <button type="button" className="play-button" onClick={() => onNavigate('recreational')}>
+            Open recreational
+          </button>
+        ) : null}
+        {page === 'recreational' && isAuthenticated ? (
           <button type="button" className="play-button" onClick={() => onNavigate('chat')}>
             Open chat
           </button>
         ) : null}
-        <span className="status-text">
-          {isAuthenticated && username ? `${username} · ${status}` : status}
-        </span>
+        {page === 'quizzes' && isAuthenticated ? (
+          <button type="button" className="play-button" onClick={() => onNavigate('chat')}>
+            Open chat
+          </button>
+        ) : null}
+        <span className="status-text">{isAuthenticated ? username || 'Signed in' : ''}</span>
       </div>
     </header>
   )
@@ -1104,23 +1531,20 @@ function AuthPage({
 }
 
 function RecommendedEventsPage({
-  username,
   isAuthenticated,
   isLoading,
   overview,
-  items,
   onNavigate,
 }: {
-  username: string
   isAuthenticated: boolean
   isLoading: boolean
   overview: OverviewResp | null
-  items: RecommendedItem[]
   onNavigate: (page: Page) => void
 }) {
   const data = overview ?? buildFallbackOverview()
   const nextEvent = data.upcoming_events[0]
   const nextDeadline = data.upcoming_deadlines[0]
+  const dayGroups = buildRecommendedDayGroups(data)
 
   if (!isAuthenticated) {
     return (
@@ -1150,10 +1574,13 @@ function RecommendedEventsPage({
       <div className="recommended-hero">
         <div>
           <p className="eyebrow">Personalized view</p>
-          <h2>{username ? `${username}'s next best moves` : 'Your next best moves'}</h2>
+          <h2>{'Your next best moves'}</h2>
         </div>
         <div className="recommended-actions">
           {isLoading ? <Badge variant="muted">Refreshing...</Badge> : null}
+          <Button type="button" variant="ghost" onClick={() => onNavigate('recreational')}>
+            Events
+          </Button>
           <Button type="button" onClick={() => onNavigate('chat')}>
             Open chat
           </Button>
@@ -1202,31 +1629,388 @@ function RecommendedEventsPage({
         </Card>
       </div>
 
-      <div className="recommended-grid">
-        {items.map((item) => (
-          <Card key={item.id} className="recommended-card">
-            <CardHeader
-              title={item.title}
-              subtitle={item.course}
-              action={
-                <Badge variant={item.tone === 'danger' ? 'danger' : item.tone === 'success' ? 'success' : 'accent'}>
-                  {item.badge}
-                </Badge>
-              }
-            />
-            <CardContent className="recommended-card-body">
-              <div className="recommended-time-row">
-                <span className="recommended-time-primary">{item.primaryTime}</span>
-                {item.secondaryTime ? (
-                  <span className="recommended-time-secondary">{item.secondaryTime}</span>
-                ) : null}
+      <div className="recommended-days">
+        {dayGroups.map((group) => (
+          <section key={group.id} className="recommended-day-section">
+            <div className="recommended-day-header">
+              <div>
+                <p className="eyebrow">Day view</p>
+                <h3>{group.label}</h3>
               </div>
-              <p className="recommended-reason">{item.reason}</p>
-            </CardContent>
-          </Card>
+            </div>
+
+            <div className="recommended-day-row">
+              <div className="recommended-day-lane">
+                <div className="recommended-lane-header">
+                  <h4>Deadlines</h4>
+                </div>
+                {group.deadlines.length ? (
+                  <div className="recommended-items-grid">
+                    {group.deadlines.map((item) => (
+                      <RecommendedItemCard key={item.id} item={item} />
+                    ))}
+                  </div>
+                ) : (
+                  <p className="recommended-empty-copy">-</p>
+                )}
+              </div>
+
+              <div className="recommended-day-lane">
+                <div className="recommended-lane-header">
+                  <h4>Events</h4>
+                </div>
+                {group.events.length ? (
+                  <div className="recommended-items-grid">
+                    {group.events.map((item) => (
+                      <RecommendedItemCard key={item.id} item={item} />
+                    ))}
+                  </div>
+                ) : (
+                  <p className="recommended-empty-copy">-</p>
+                )}
+              </div>
+            </div>
+          </section>
         ))}
       </div>
+
     </section>
+  )
+}
+
+function RecreationalEventsPage({
+  isAuthenticated,
+  discoveredEvents,
+  isLoadingDiscoveredEvents,
+  isScanningDiscoveredEvents,
+  discoveredEventsError,
+  onNavigate,
+}: {
+  isAuthenticated: boolean
+  discoveredEvents: DiscoveredEvent[]
+  isLoadingDiscoveredEvents: boolean
+  isScanningDiscoveredEvents: boolean
+  discoveredEventsError: string
+  onNavigate: (page: Page) => void
+}) {
+  if (!isAuthenticated) {
+    return (
+      <section className="auth-page">
+        <Card className="auth-card auth-card-highlight">
+          <CardHeader
+            title="Recommended recreational events"
+            subtitle="Log in to load the personalized event discovery feed from the backend."
+          />
+          <CardContent>
+            <div className="auth-actions">
+              <Button type="button" onClick={() => onNavigate('login')}>
+                Go to login
+              </Button>
+              <Button type="button" variant="ghost" onClick={() => onNavigate('signup')}>
+                Create account
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+    )
+  }
+
+  return (
+    <section className="recommended-page">
+        <h3>Tailored event recommendations for April/May</h3>
+      <section className="recommended-day-section recreational-events-section">
+        {isLoadingDiscoveredEvents || isScanningDiscoveredEvents ? (
+          <Card className="recommended-empty-card recreational-state-card">
+            <CardContent>
+              <p className="recommended-empty-copy">
+                {isScanningDiscoveredEvents
+                  ? 'Scanning for fresh recreational events...'
+                  : 'Loading saved recreational events...'}
+              </p>
+            </CardContent>
+          </Card>
+        ) : discoveredEventsError ? (
+          <Card className="recommended-empty-card recreational-state-card">
+            <CardContent>
+              <p className="recommended-empty-copy">{discoveredEventsError}</p>
+            </CardContent>
+          </Card>
+        ) : discoveredEvents.length ? (
+          <div className="events-grid recreational-events-grid">
+            {discoveredEvents.map((event) => (
+              <DiscoveredEventCard key={event.id} event={event} />
+            ))}
+          </div>
+        ) : (
+          <Card className="recommended-empty-card recreational-state-card">
+            <CardContent>
+              <p className="recommended-empty-copy">
+                No recreational recommendations yet. Run a scan to fetch tailored picks.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+      </section>
+    </section>
+  )
+}
+
+function QuizLibraryPage({
+  isAuthenticated,
+  quizLibrary,
+  isLoading,
+  error,
+  onRetake,
+  onNavigate,
+}: {
+  isAuthenticated: boolean
+  quizLibrary: QuizLibraryResponse | null
+  isLoading: boolean
+  error: string
+  onRetake: (quiz: QuizLibraryItem) => void
+  onNavigate: (page: Page) => void
+}) {
+  if (!isAuthenticated) {
+    return (
+      <section className="auth-page">
+        <Card className="auth-card auth-card-highlight">
+          <CardHeader
+            title="Quiz library"
+            subtitle="Log in to review your saved quizzes, weak spots, and retake them."
+          />
+          <CardContent>
+            <div className="auth-actions">
+              <Button type="button" onClick={() => onNavigate('login')}>
+                Go to login
+              </Button>
+              <Button type="button" variant="ghost" onClick={() => onNavigate('signup')}>
+                Create account
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+    )
+  }
+
+  const overallAverage = quizLibrary?.overall_average_percent ?? 0
+  const quizzes = quizLibrary?.quizzes ?? []
+  const underperformingCount = quizzes.filter((quiz) => quiz.underperformed).length
+
+  return (
+    <section className="recommended-page">
+      <div className="recommended-hero">
+        <div>
+          <p className="eyebrow">Quiz library</p>
+          <h2>Retake what needs another pass</h2>
+        </div>
+        <div className="recommended-actions">
+          <Badge variant={underperformingCount > 0 ? 'danger' : 'success'}>
+            {underperformingCount > 0
+              ? `${underperformingCount} weak spot${underperformingCount === 1 ? '' : 's'}`
+              : 'On track'}
+          </Badge>
+          <Button type="button" variant="ghost" onClick={() => onNavigate('recommended')}>
+            Overview
+          </Button>
+          <Button type="button" onClick={() => onNavigate('chat')}>
+            Open chat
+          </Button>
+        </div>
+      </div>
+
+      <div className="recommended-summary-grid">
+        <Card>
+          <CardHeader title="Overall average" subtitle="Across all completed quiz attempts" />
+          <CardContent>
+            <p className="summary-number">{overallAverage}%</p>
+            <p className="summary-caption">Used as the baseline for weak-spot highlighting.</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader title="Saved quizzes" subtitle="Every grounded quiz stored for this user" />
+          <CardContent>
+            <p className="summary-number">{quizzes.length}</p>
+            <p className="summary-caption">
+              {quizzes.length ? `${quizzes.reduce((sum, quiz) => sum + quiz.attempt_count, 0)} attempts logged` : 'No quizzes yet'}
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader title="Underperformed" subtitle="Average below your overall average" />
+          <CardContent>
+            <p className="summary-number">{underperformingCount}</p>
+            <p className="summary-caption">Highlighted first so you know what to revisit.</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader title="Ready to retake" subtitle="Stored question sets reopen in the popup" />
+          <CardContent>
+            <p className="summary-number">{quizzes.filter((quiz) => quiz.question_count > 0).length}</p>
+            <p className="summary-caption">Every card below can be retaken with one click.</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {isLoading ? (
+        <Card className="recommended-empty-card">
+          <CardContent>
+            <p className="recommended-empty-copy">Loading your quiz library...</p>
+          </CardContent>
+        </Card>
+      ) : error ? (
+        <Card className="recommended-empty-card">
+          <CardContent>
+            <p className="recommended-empty-copy">{error}</p>
+          </CardContent>
+        </Card>
+      ) : quizzes.length === 0 ? (
+        <Card className="recommended-empty-card">
+          <CardContent>
+            <p className="recommended-empty-copy">
+              No quizzes recorded yet. Run a demo flow or finish a drill to populate this page.
+            </p>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="quiz-library-grid">
+          {quizzes
+            .slice()
+            .sort((left, right) => Number(right.underperformed) - Number(left.underperformed))
+            .map((quiz) => (
+              <Card
+                key={quiz.id}
+                className={`quiz-library-card ${quiz.underperformed ? 'is-underperforming' : ''}`}
+              >
+                <CardHeader
+                  title={quiz.title}
+                  subtitle={quiz.course_name ?? quiz.topic}
+                  action={
+                    <Badge variant={quiz.underperformed ? 'danger' : 'success'}>
+                      {quiz.underperformed ? 'Needs work' : 'Healthy'}
+                    </Badge>
+                  }
+                />
+                <CardContent className="quiz-library-body">
+                  <div className="quiz-library-stats">
+                    <div className="quiz-library-stat">
+                      <span className="quiz-library-stat-label">Average</span>
+                      <strong>{quiz.average_percent != null ? `${quiz.average_percent}%` : 'Not taken'}</strong>
+                    </div>
+                    <div className="quiz-library-stat">
+                      <span className="quiz-library-stat-label">Latest</span>
+                      <strong>{quiz.latest_percent != null ? `${quiz.latest_percent}%` : 'No score'}</strong>
+                    </div>
+                    <div className="quiz-library-stat">
+                      <span className="quiz-library-stat-label">Best</span>
+                      <strong>{quiz.best_percent != null ? `${quiz.best_percent}%` : 'No score'}</strong>
+                    </div>
+                    <div className="quiz-library-stat">
+                      <span className="quiz-library-stat-label">Attempts</span>
+                      <strong>{quiz.attempt_count}</strong>
+                    </div>
+                  </div>
+                  <p className="quiz-library-meta">
+                    {quiz.question_count} questions · about {quiz.estimated_duration_minutes} min · created{' '}
+                    {formatDayTime(quiz.created_at)}
+                  </p>
+                  <p className="quiz-library-note">
+                    {quiz.underperformed
+                      ? `Below your ${quiz.overall_average_percent}% overall average. Worth another pass.`
+                      : `At or above your ${quiz.overall_average_percent}% overall average.`}
+                  </p>
+                  <div className="quiz-library-actions">
+                    <Button type="button" onClick={() => onRetake(quiz)}>
+                      Retake quiz
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function RecommendedItemCard({ item }: { item: RecommendedItem }) {
+  return (
+    <Card className="recommended-card">
+      <CardHeader
+        title={item.title}
+        subtitle={item.course}
+        action={
+          <Badge variant={item.tone === 'danger' ? 'danger' : item.tone === 'success' ? 'success' : 'accent'}>
+            {item.badge}
+          </Badge>
+        }
+      />
+      <CardContent className="recommended-card-body">
+        <div className="recommended-time-row">
+          <span className="recommended-time-primary">{item.primaryTime}</span>
+          {item.secondaryTime ? (
+            <span className="recommended-time-secondary">{item.secondaryTime}</span>
+          ) : null}
+        </div>
+        <p className="recommended-reason">{item.reason}</p>
+      </CardContent>
+    </Card>
+  )
+}
+
+function CategoryBadge({ category }: { category: string }) {
+  return (
+    <span
+      className="category-badge"
+      style={{ background: CATEGORY_COLORS[category] ?? CATEGORY_COLORS.other }}
+    >
+      {category}
+    </span>
+  )
+}
+
+function ScoreBar({ score }: { score: number }) {
+  const pct = Math.max(0, Math.min(100, score))
+  const hue = Math.round((pct / 100) * 120)
+  return (
+    <div className="score-bar-track" title={`Score: ${pct}/100`}>
+      <div
+        className="score-bar-fill"
+        style={{ width: `${pct}%`, background: `hsl(${hue}, 60%, 38%)` }}
+      />
+      <span className="score-bar-label">{pct}/100</span>
+    </div>
+  )
+}
+
+function DiscoveredEventCard({ event }: { event: DiscoveredEvent }) {
+  return (
+    <article className="event-card">
+      <div className="event-card-header">
+        <CategoryBadge category={event.category} />
+        {event.notified ? <Badge variant="muted">Notified</Badge> : null}
+      </div>
+      <h3 className="event-card-title">{event.title}</h3>
+      <ScoreBar score={event.score} />
+      {event.score_reasoning ? <p className="event-reasoning">{event.score_reasoning}</p> : null}
+      <div className="event-meta">
+        {event.event_date ? <span className="event-meta-item">📅 {event.event_date}</span> : null}
+        {event.location ? <span className="event-meta-item">📍 {event.location}</span> : <span />}
+        {event.signup_deadline ? (
+          <span className="event-meta-item">Signup by {event.signup_deadline}</span>
+        ) : null}
+      </div>
+      <p className="event-description">
+        {event.description.slice(0, 220)}
+        {event.description.length > 220 ? '…' : ''}
+      </p>
+      {event.url ? (
+        <a className="event-link" href={event.url} target="_blank" rel="noopener noreferrer">
+          View event →
+        </a>
+      ) : null}
+    </article>
   )
 }
 
@@ -1282,6 +2066,11 @@ const MOCK_FOCUS_STATS = {
   minutes_goal: 180,
 }
 
+const MOCK_SEMESTER_PROGRESS = {
+  exams_percent: 68,
+  exams_label: '5 weeks left',
+}
+
 const MOCK_STREAK_WEEK: { label: string; minutes: number }[] = [
   { label: 'Fr', minutes: 145 },
   { label: 'Sa', minutes: 60 },
@@ -1291,6 +2080,10 @@ const MOCK_STREAK_WEEK: { label: string; minutes: number }[] = [
   { label: 'We', minutes: 180 },
   { label: 'Th', minutes: 92 },
 ]
+
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
 
 const MOCK_TOPIC_FOCUS: {
   topic: string
@@ -1395,8 +2188,17 @@ function Sidebar({
   onLogout: () => void
 }) {
   const data = overview ?? buildFallbackOverview()
+  const studyProgressPercent = clampPercent(Math.max(data.quiz.average_percent, 12))
+  const examProgressPercent = clampPercent(MOCK_SEMESTER_PROGRESS.exams_percent)
+  const onTrackDelta = studyProgressPercent - examProgressPercent
+  const onTrackLabel =
+    onTrackDelta >= 8 ? 'Ahead' : onTrackDelta >= -6 ? 'On track' : 'Behind'
+  const onTrackVariant =
+    onTrackDelta >= 8 ? 'success' : onTrackDelta >= -6 ? 'accent' : 'danger'
   const navItems: { page: Page; label: string; requiresAuth?: boolean }[] = [
-    { page: 'recommended', label: 'Recommended', requiresAuth: true },
+    { page: 'recommended', label: 'TumTum', requiresAuth: true },
+    { page: 'recreational', label: 'Events', requiresAuth: true },
+    { page: 'quizzes', label: 'Quizzes', requiresAuth: true },
     { page: 'chat', label: 'Chat', requiresAuth: true },
     { page: 'demo', label: 'Demo chat', requiresAuth: true },
   ]
@@ -1458,22 +2260,54 @@ function Sidebar({
             <span className="sidebar-stat-label">of {MOCK_FOCUS_STATS.minutes_goal}m</span>
           </div>
         </div>
-        <div
-          className="sidebar-progress"
-          role="progressbar"
-          aria-valuenow={MOCK_FOCUS_STATS.minutes_today}
-          aria-valuemin={0}
-          aria-valuemax={MOCK_FOCUS_STATS.minutes_goal}
-        >
-          <div
-            className="sidebar-progress-fill"
-            style={{
-              width: `${Math.min(
-                100,
-                (MOCK_FOCUS_STATS.minutes_today / MOCK_FOCUS_STATS.minutes_goal) * 100,
-              )}%`,
-            }}
-          />
+        <div className="sidebar-progress-stack">
+          <div className="sidebar-progress-headline">
+            <span className="sidebar-progress-caption">Semester pace</span>
+            <Badge variant={onTrackVariant}>{onTrackLabel}</Badge>
+          </div>
+          <div className="sidebar-progress-metric">
+            <div className="sidebar-progress-meta">
+              <span>Until exams</span>
+              <span>{MOCK_SEMESTER_PROGRESS.exams_label}</span>
+            </div>
+            <div
+              className="sidebar-progress"
+              role="progressbar"
+              aria-label="Until exams"
+              aria-valuenow={examProgressPercent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
+              <div
+                className="sidebar-progress-fill sidebar-progress-fill-timeline"
+                style={{ width: `${examProgressPercent}%` }}
+              />
+            </div>
+          </div>
+          <div className="sidebar-progress-metric">
+            <div className="sidebar-progress-meta">
+              <span>Studying progress</span>
+              <span>{studyProgressPercent}% ready</span>
+            </div>
+            <div
+              className="sidebar-progress"
+              role="progressbar"
+              aria-label="Studying progress"
+              aria-valuenow={studyProgressPercent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
+              <div
+                className="sidebar-progress-fill sidebar-progress-fill-study"
+                style={{ width: `${studyProgressPercent}%` }}
+              />
+            </div>
+          </div>
+          <p className="sidebar-progress-note">
+            {onTrackDelta >= 0
+              ? `${onTrackDelta}% above the semester pace based on recent quiz performance.`
+              : `${Math.abs(onTrackDelta)}% below the semester pace. Time for a retake block.`}
+          </p>
         </div>
         <div className="sidebar-heatmap" aria-label="Last 7 days of focus minutes">
           {MOCK_STREAK_WEEK.map((day) => {
@@ -1762,13 +2596,15 @@ function pageFromHash(hash: string, isAuthenticated: boolean): Page {
   const raw = hash.replace(/^#/, '')
   if (raw === 'signup') return 'signup'
   if (raw === 'recommended') return isAuthenticated ? 'recommended' : 'login'
+  if (raw === 'recreational') return isAuthenticated ? 'recreational' : 'login'
+  if (raw === 'quizzes') return isAuthenticated ? 'quizzes' : 'login'
   if (raw === 'chat') return isAuthenticated ? 'chat' : 'login'
   if (raw === 'demo') return isAuthenticated ? 'demo' : 'login'
   return 'login'
 }
 
 function ensurePublicPage(page: Page): Page {
-  if (page === 'recommended' || page === 'chat' || page === 'demo') {
+  if (page === 'recommended' || page === 'recreational' || page === 'quizzes' || page === 'chat' || page === 'demo') {
     return 'login'
   }
   return page
@@ -1791,15 +2627,17 @@ function buildFallbackOverview(): OverviewResp {
   }
 }
 
-function buildRecommendations(overview: OverviewResp | null): RecommendedItem[] {
-  const data = overview ?? buildFallbackOverview()
-  const events = data.upcoming_events.slice(0, 4).map((event) => {
+function buildRecommendedDayGroups(data: OverviewResp): RecommendedDayGroup[] {
+  const groups = new Map<string, RecommendedDayGroup>()
+
+  const events = data.upcoming_events.map((event) => {
     const hoursAway = hoursUntil(event.start_datetime)
     return {
       id: `event-${event.id}`,
       kind: 'event' as const,
       title: event.name,
       course: event.course_name || 'Course',
+      timestamp: event.start_datetime,
       primaryTime: formatDayTime(event.start_datetime),
       secondaryTime: `${formatShortTime(event.start_datetime)}–${formatShortTime(event.end_datetime)}`,
       badge: event.type,
@@ -1811,13 +2649,14 @@ function buildRecommendations(overview: OverviewResp | null): RecommendedItem[] 
     }
   })
 
-  const deadlines = data.upcoming_deadlines.slice(0, 3).map((deadline) => {
+  const deadlines = data.upcoming_deadlines.map((deadline) => {
     const hoursAway = hoursUntil(deadline.datetime)
     return {
       id: `deadline-${deadline.id}`,
       kind: 'deadline' as const,
       title: deadline.name,
       course: deadline.course_name || 'Course',
+      timestamp: deadline.datetime,
       primaryTime: formatDayTime(deadline.datetime),
       badge: hoursAway <= 36 ? 'Due soon' : 'Deadline',
       tone: hoursAway <= 36 ? ('danger' as const) : ('accent' as const),
@@ -1828,7 +2667,44 @@ function buildRecommendations(overview: OverviewResp | null): RecommendedItem[] 
     }
   })
 
-  return [...deadlines, ...events].slice(0, 6)
+  for (const item of [...deadlines, ...events]) {
+    const day = describeCalendarDay(item.timestamp)
+    const existing = groups.get(day.id)
+    if (existing) {
+      if (item.kind === 'deadline') {
+        existing.deadlines.push(item)
+      } else {
+        existing.events.push(item)
+      }
+      continue
+    }
+    groups.set(day.id, {
+      id: day.id,
+      label: day.label,
+      deadlines: item.kind === 'deadline' ? [item] : [],
+      events: item.kind === 'event' ? [item] : [],
+    })
+  }
+
+  return [...groups.values()]
+    .sort((left, right) => {
+      const leftTime = Math.min(
+        ...left.deadlines.concat(left.events).map((item) => new Date(item.timestamp).getTime()),
+      )
+      const rightTime = Math.min(
+        ...right.deadlines.concat(right.events).map((item) => new Date(item.timestamp).getTime()),
+      )
+      return leftTime - rightTime
+    })
+    .map((group) => ({
+      ...group,
+      deadlines: [...group.deadlines].sort(
+        (left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime(),
+      ),
+      events: [...group.events].sort(
+        (left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime(),
+      ),
+    }))
 }
 
 function hoursUntil(iso: string) {
@@ -1882,6 +2758,18 @@ function formatDayTime(iso: string) {
     })
   } catch {
     return iso
+  }
+}
+
+function describeCalendarDay(iso: string) {
+  const date = new Date(iso)
+  return {
+    id: date.toISOString().slice(0, 10),
+    label: date.toLocaleDateString(undefined, {
+      weekday: 'long',
+      month: 'short',
+      day: 'numeric',
+    }),
   }
 }
 

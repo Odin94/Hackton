@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 import litellm
 
+from app.llm_context import with_current_datetime_context
 from .db import create_notification, write_entry
 
 logger = logging.getLogger(__name__)
@@ -140,7 +141,7 @@ async def _quiz_llm_call(system_prompt: str, user_prompt: str) -> list[dict]:
         logger.debug("_quiz_llm_call LLM request turn=%d messages_in_history=%d", turn, len(messages))
         response = await litellm.acompletion(
             model=MODEL,
-            messages=messages,
+            messages=with_current_datetime_context(messages),
             tools=TOOLS,
             tool_choice="auto",
         )

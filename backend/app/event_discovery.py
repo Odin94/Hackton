@@ -24,6 +24,7 @@ from agent.database import AsyncSessionLocal
 from agent.db import create_notification
 from agent.models import AgentLog, ChatMessage, Course, DiscoveredEvent, EventScrapingResult, User
 from app.config import settings
+from app.llm_context import with_current_datetime_context
 
 log = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ async def _llm_json(messages: list[dict]) -> dict:
     resp = await litellm.acompletion(
         model=settings.llm_model,
         api_key=settings.llm_api_key,
-        messages=messages,
+        messages=with_current_datetime_context(messages),
         response_format={"type": "json_object"},
         temperature=0.3,
     )

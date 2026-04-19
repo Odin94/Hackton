@@ -782,6 +782,8 @@ async def test_generate_quiz_uses_function_calling_not_response_format(
     assert kwargs["tools"][0]["type"] == "function"
     assert kwargs["tools"][0]["function"]["name"] == "emit_quiz"
     assert kwargs["tool_choice"]["function"]["name"] == "emit_quiz"
+    assert kwargs["messages"][0]["role"] == "system"
+    assert "Current UTC datetime:" in kwargs["messages"][0]["content"]
     # Must NOT be using the problematic response_format path.
     assert "response_format" not in kwargs
     assert "extra_body" not in kwargs
