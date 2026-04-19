@@ -24,7 +24,7 @@ from .database import AsyncSessionLocal
 from .db import list_user_ids, read_recent
 from .harness import _quiz_llm_call
 from .models import Course, Deadline, Notification, Quiz, QuizResult, ScheduleEvent, User
-from .quiz_workflow import dispatch_due_notifications
+from .quiz_workflow import dispatch_due_notifications, ensure_quizzes_for_upcoming_events
 
 log = logging.getLogger(__name__)
 
@@ -173,7 +173,10 @@ async def _build_scheduler_sqlite_context(user_id: int) -> str:
         )
 
     lines = [
-        f"User: username={user.username!r}, name={user.name!r}, email={user.email!r}",
+        (
+            f"User: username={user.username!r}, name={user.name!r}, email={user.email!r}, "
+            f"interests={user.interests!r}, future_goals={user.future_goals!r}"
+        ),
         "Courses:",
     ]
     if courses:
@@ -266,6 +269,23 @@ async def _llm_checkin_loop() -> None:
             )
             for user_id in user_ids:
                 try:
+                    # Generate quizzes for events starting before the next check-in,
+                    # then build context so the LLM sees them and avoids duplicates.
+                    try:
+                        new_notif_ids = await ensure_quizzes_for_upcoming_events(
+                            user_id, LLM_CHECKIN_INTERVAL
+                        )
+                        if new_notif_ids:
+                            log.info(
+                                "Scheduler: pre-generated %d quiz notification(s) for user_id=%d",
+                                len(new_notif_ids),
+                                user_id,
+                            )
+                    except Exception:
+                        log.exception(
+                            "Scheduler: quiz pre-generation failed for user_id=%d", user_id
+                        )
+
                     sqlite_context = await _build_scheduler_sqlite_context(user_id)
                     messages = await _quiz_llm_call(
                         _LLM_SYSTEM_PROMPT,

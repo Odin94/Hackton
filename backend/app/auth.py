@@ -24,8 +24,3 @@ def create_token(user_id: int) -> str:
 def get_user_id(token: str) -> int | None:
     """Resolve *token* → user_id, or None if the token is unknown."""
     return _tokens.get(token)
-
-
-def revoke(token: str) -> None:
-    """Forget a token (e.g. on explicit logout)."""
-    _tokens.pop(token, None)

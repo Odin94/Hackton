@@ -83,6 +83,8 @@ class User(_Timestamps, Base):
     name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     email: Mapped[str | None] = mapped_column(String(256), unique=True, index=True, nullable=True)
     phone_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    interests: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    future_goals: Mapped[str | None] = mapped_column(String(2048), nullable=True)
 
     # Relationships
     courses: Mapped[list["Course"]] = relationship(back_populates="user")
@@ -296,3 +298,63 @@ class AgentLog(_Timestamps, Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     entry_type: Mapped[str] = mapped_column(String(64), nullable=False)
     content: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class EventScrapingTarget(_Timestamps, Base):
+    """A URL we periodically scrape for events (e.g. the Studierendenwerk portal)."""
+
+    __tablename__ = "event_scraping_targets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    url: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
+    scrape_interval_days: Mapped[int] = mapped_column(Integer, nullable=False, default=7)
+    last_scraped_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+
+    results: Mapped[list["EventScrapingResult"]] = relationship(back_populates="target")
+
+
+class EventScrapingResult(Base):
+    """Raw text extracted from one URL that was reached from an EventScrapingTarget."""
+
+    __tablename__ = "event_scraping_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("event_scraping_targets.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    url: Mapped[str] = mapped_column(String(1024), nullable=False, index=True)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    text_content: Mapped[str] = mapped_column(String, nullable=False)
+    scraped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+    target: Mapped["EventScrapingTarget"] = relationship(back_populates="results")
+
+
+class DiscoveredEvent(_Timestamps, Base):
+    """An event found by the LLM web-scraping loop, scored for a specific user."""
+
+    __tablename__ = "discovered_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    description: Mapped[str] = mapped_column(String, nullable=False)
+    url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    location: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # ISO-8601 strings — stored as text so we can handle "TBD" / unknown dates
+    event_date_str: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    signup_deadline_str: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # "career" | "fun" | "networking" | "other"
+    category: Mapped[str] = mapped_column(String(32), nullable=False, default="other")
+    # Composite relevance score 0–100 assigned by the LLM
+    score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    score_reasoning: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Whether a notification was already created for the user
+    notified: Mapped[bool] = mapped_column(Integer, nullable=False, default=False)
+
+    user: Mapped["User"] = relationship()

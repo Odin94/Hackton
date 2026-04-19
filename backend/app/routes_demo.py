@@ -18,14 +18,15 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header
 from pydantic import BaseModel, Field
 
 from sqlalchemy import func, select
 
 from agent.database import AsyncSessionLocal
 from agent.models import Course, Deadline, Quiz, QuizResult, ScheduleEvent
-from app.auth import get_user_id
+from app.api_auth import require_bearer_user_id
+from app.chat_models import ChatMessageResp, to_chat_message_resp
 from app.chat_service import append_chat_message, serialize_chat_message
 from app.connection_manager import manager
 
@@ -53,15 +54,6 @@ class QuizResultReq(BaseModel):
     course_id: int | None = None
 
 
-class ChatMessageResp(BaseModel):
-    id: int
-    user_id: int
-    timestamp: str
-    author: str
-    sequence_number: int
-    content: str
-
-
 class ScriptedTurnResp(BaseModel):
     user_message: ChatMessageResp
     assistant_message: ChatMessageResp
@@ -74,16 +66,6 @@ class SystemMessageResp(BaseModel):
 class QuizResultResp(BaseModel):
     quiz_id: int
     quiz_result_id: int
-
-
-def _require_user_id(authorization: str | None) -> int:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="missing authorization token")
-    token = authorization.removeprefix("Bearer ").strip()
-    user_id = get_user_id(token)
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="invalid or expired token")
-    return user_id
 
 
 async def _push_chat_message(user_id: int, message) -> None:
@@ -107,7 +89,7 @@ async def post_scripted_turn(
     req: ScriptedTurnReq,
     authorization: str | None = Header(default=None),
 ) -> ScriptedTurnResp:
-    user_id = _require_user_id(authorization)
+    user_id = require_bearer_user_id(authorization)
     async with AsyncSessionLocal() as session:
         user_message = await append_chat_message(
             session, user_id=user_id, author="user", content=req.user_content
@@ -123,8 +105,8 @@ async def post_scripted_turn(
     # message shows before the system reply. Pushing via WS here would race
     # the HTTP response and flip the order.
     return ScriptedTurnResp(
-        user_message=ChatMessageResp(**serialize_chat_message(user_message)),
-        assistant_message=ChatMessageResp(**serialize_chat_message(system_message)),
+        user_message=to_chat_message_resp(user_message),
+        assistant_message=to_chat_message_resp(system_message),
     )
 
 
@@ -137,7 +119,7 @@ async def post_system_message(
     req: SystemMessageReq,
     authorization: str | None = Header(default=None),
 ) -> SystemMessageResp:
-    user_id = _require_user_id(authorization)
+    user_id = require_bearer_user_id(authorization)
     async with AsyncSessionLocal() as session:
         message = await append_chat_message(
             session, user_id=user_id, author="system", content=req.content
@@ -145,7 +127,7 @@ async def post_system_message(
         await session.commit()
         await session.refresh(message)
     await _push_chat_message(user_id, message)
-    return SystemMessageResp(message=ChatMessageResp(**serialize_chat_message(message)))
+    return SystemMessageResp(message=to_chat_message_resp(message))
 
 
 @router.post(
@@ -157,7 +139,7 @@ async def post_quiz_results(
     req: QuizResultReq,
     authorization: str | None = Header(default=None),
 ) -> QuizResultResp:
-    user_id = _require_user_id(authorization)
+    user_id = require_bearer_user_id(authorization)
     async with AsyncSessionLocal() as session:
         quiz = Quiz(
             user_id=user_id,

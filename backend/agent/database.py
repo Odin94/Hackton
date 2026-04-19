@@ -50,6 +50,18 @@ async def create_all_tables() -> None:
         if engine.dialect.name == "sqlite":
             await _sqlite_add_column_if_missing(
                 conn,
+                "users",
+                "interests",
+                "interests VARCHAR(2048)",
+            )
+            await _sqlite_add_column_if_missing(
+                conn,
+                "users",
+                "future_goals",
+                "future_goals VARCHAR(2048)",
+            )
+            await _sqlite_add_column_if_missing(
+                conn,
                 "schedule_events",
                 "course_id",
                 "course_id INTEGER REFERENCES courses(id)",

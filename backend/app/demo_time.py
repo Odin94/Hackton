@@ -55,10 +55,12 @@ def install_demo_clock(override: str | None) -> None:
     for name, module in list(sys.modules.items()):
         if module is None:
             continue
-        if name in _PATCH_EXACT or any(name.startswith(p) for p in _PATCH_PREFIXES):
-            if getattr(module, "datetime", None) is datetime:
-                module.datetime = frozen_cls
-                patched.append(name)
+        if (
+            (name in _PATCH_EXACT or any(name.startswith(p) for p in _PATCH_PREFIXES))
+            and getattr(module, "datetime", None) is datetime
+        ):
+            module.datetime = frozen_cls
+            patched.append(name)
     log.warning(
         "Demo clock ACTIVE — datetime.now() frozen at %s in %d modules: %s",
         fixed.isoformat(),

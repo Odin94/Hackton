@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, select
 
@@ -177,7 +177,7 @@ async def _seed_quiz_history(session, user_id: int, courses: dict[str, Course]) 
         (ds, "DS: DFA-Konstruktion", "DFA, endliche Automaten", _dt(2025, 11, 13, 17), 4, 1),
     ]
 
-    for i, (course, title, topic, taken, correct, false) in enumerate(arc):
+    for course, title, topic, taken, correct, false in arc:
         total = correct + false
         questions = [
             {
