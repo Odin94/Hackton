@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import './App.css'
-import { Badge, GlowDot } from './components/ui'
+import { Badge, Button, Card, CardContent, CardHeader, GlowDot } from './components/ui'
 import {
-  DEMO_USERNAME,
   SCENE_A_PING,
   SCENE_C_REPLY,
   SCENE_E_RECAP_BODY,
@@ -12,6 +11,8 @@ import {
   FALLBACK_QUIZ,
   type DemoQuizQuestion,
 } from './demoContent'
+
+type Page = 'login' | 'signup' | 'recommended' | 'chat' | 'demo'
 
 type AuthResponse = {
   token: string
@@ -23,7 +24,7 @@ type ChatMessage = {
   id: number
   user_id: number
   timestamp: string
-  author: 'user' | 'system'
+  author: 'user' | 'TumTum'
   sequence_number: number
   content: string
   processing_ms?: number | null
@@ -32,6 +33,10 @@ type ChatMessage = {
 type ChatReplyResponse = {
   user_message: ChatMessage
   assistant_message: ChatMessage
+}
+
+type ChatHistoryResponse = {
+  messages: ChatMessage[]
 }
 
 type ChatSocketPayload = {
@@ -64,7 +69,20 @@ type OverviewResp = {
   quiz: OverviewQuizStat
 }
 
+type RecommendedItem = {
+  id: string
+  kind: 'event' | 'deadline'
+  title: string
+  course: string
+  primaryTime: string
+  secondaryTime?: string
+  badge: string
+  tone: 'accent' | 'success' | 'danger'
+  reason: string
+}
+
 const TOKEN_KEY = 'tumtum-demo-token'
+const USERNAME_KEY = 'tumtum-demo-username'
 
 const SCENE_B_USER_LINE =
   "hmm yeah, the powerset concept got away from me. got time for a quick review?"
@@ -80,6 +98,12 @@ const POST_BUBBLE_BREATH_MS = 1400
 const SCENE_BC_LIVE_TIMEOUT_MS = 10_000
 const SCENE_D_QUIZ_GRACE_MS = 500
 const SCENE_D_QUIZ_TOPIC = 'powerset construction NFA DFA epsilon closures'
+
+const PAGE_LABELS: Partial<Record<Page, string>> = {
+  recommended: 'Recommended events',
+  chat: 'Chat',
+  demo: 'Demo chat',
+}
 
 function typingDurationMs(text: string): number {
   return Math.max(600, text.length * TYPING_MS_PER_CHAR)
@@ -140,7 +164,7 @@ async function fetchLiveQuiz(
       typeof item.question !== 'string' ||
       !Array.isArray(item.options) ||
       item.options.length !== 4 ||
-      !item.options.every((o) => typeof o === 'string') ||
+      !item.options.every((option) => typeof option === 'string') ||
       typeof item.correct_index !== 'number' ||
       item.correct_index < 0 ||
       item.correct_index > 3
@@ -158,14 +182,30 @@ async function fetchLiveQuiz(
 }
 
 function App() {
+  const [username, setUsername] = useState(() => localStorage.getItem(USERNAME_KEY) ?? '')
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) ?? '')
+  const [page, setPage] = useState<Page>(() =>
+    pageFromHash(window.location.hash, Boolean(localStorage.getItem(TOKEN_KEY))),
+  )
+  const [loginName, setLoginName] = useState(() => localStorage.getItem(USERNAME_KEY) ?? '')
+  const [signupName, setSignupName] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [draft, setDraft] = useState('')
-  const [status, setStatus] = useState('Booting demo...')
+  const [status, setStatus] = useState(
+    token
+      ? 'Signed in. Open Recommended events to review what is next.'
+      : 'Log in with an existing username or create a new account.',
+  )
+  const [authError, setAuthError] = useState('')
+  const [isLoggingIn, setIsLoggingIn] = useState(false)
+  const [isSigningUp, setIsSigningUp] = useState(false)
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false)
+  const [isLoadingOverview, setIsLoadingOverview] = useState(false)
+  const [isSending, setIsSending] = useState(false)
+  const [pendingUserMessageId, setPendingUserMessageId] = useState<number | null>(null)
+  const [isAutoRunning, setIsAutoRunning] = useState(false)
   const [quizOpen, setQuizOpen] = useState(false)
   const [quizAutoPlay, setQuizAutoPlay] = useState(false)
-  const [isSending, setIsSending] = useState(false)
-  const [isAutoRunning, setIsAutoRunning] = useState(false)
   const [overview, setOverview] = useState<OverviewResp | null>(null)
   const [activeQuiz, setActiveQuiz] = useState<{
     title: string
@@ -179,39 +219,57 @@ function App() {
   const animatedIdsRef = useRef<Set<number>>(new Set())
 
   useEffect(() => {
-    if (token) {
-      return
+    if (username) {
+      localStorage.setItem(USERNAME_KEY, username)
+      setLoginName((current) => current || username)
+    } else {
+      localStorage.removeItem(USERNAME_KEY)
     }
-    void (async () => {
-      try {
-        const response = await fetch('/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: DEMO_USERNAME }),
-        })
-        if (!response.ok) {
-          throw new Error(`login ${response.status}`)
-        }
-        const body = (await response.json()) as AuthResponse
-        localStorage.setItem(TOKEN_KEY, body.token)
-        setToken(body.token)
-      } catch (err) {
-        setStatus(`Auto-login failed: ${toMessage(err)}`)
-      }
-    })()
+  }, [username])
+
+  useEffect(() => {
+    if (token) {
+      localStorage.setItem(TOKEN_KEY, token)
+    } else {
+      localStorage.removeItem(TOKEN_KEY)
+      setOverview(null)
+      setMessages([])
+      setDraft('')
+      animatedIdsRef.current.clear()
+    }
   }, [token])
 
   useEffect(() => {
-    if (!token) {
+    const next = token ? page : ensurePublicPage(page)
+    const nextHash = `#${next}`
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, '', nextHash)
+    }
+  }, [page, token])
+
+  useEffect(() => {
+    const onHashChange = () => {
+      setPage(pageFromHash(window.location.hash, Boolean(token)))
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [token])
+
+  useEffect(() => {
+    if (token && (page === 'login' || page === 'signup')) {
+      setPage('recommended')
       return
     }
-    setStatus(`Ready as ${DEMO_USERNAME} — press Play to run the demo.`)
-  }, [token])
+    if (!token && (page === 'recommended' || page === 'chat' || page === 'demo')) {
+      setPage('login')
+    }
+  }, [page, token])
 
   const refreshOverview = useCallback(async () => {
     if (!token) {
       return
     }
+    setIsLoadingOverview(true)
     try {
       const response = await fetch('/demo/overview', {
         headers: { Authorization: `Bearer ${token}` },
@@ -221,14 +279,30 @@ function App() {
       }
       const body = (await response.json()) as OverviewResp
       setOverview(body)
-    } catch {
-      // Sidebar is best-effort; silent fail keeps demo flow clean.
+    } catch (err) {
+      setStatus(`Could not refresh recommendations: ${toMessage(err)}`)
+    } finally {
+      setIsLoadingOverview(false)
     }
   }, [token])
 
   useEffect(() => {
+    if (!token) {
+      return
+    }
+    void loadHistory(token)
     void refreshOverview()
-  }, [refreshOverview])
+  }, [token, refreshOverview])
+
+  useEffect(() => {
+    if (!token) {
+      return
+    }
+    const intervalId = window.setInterval(() => {
+      void refreshOverview()
+    }, 5000)
+    return () => window.clearInterval(intervalId)
+  }, [token, refreshOverview])
 
   useEffect(() => {
     const list = listRef.current
@@ -272,6 +346,103 @@ function App() {
       }
     }
   }, [token])
+
+  async function loadHistory(activeToken: string) {
+    setIsLoadingHistory(true)
+    try {
+      const response = await fetch('/chat/history', {
+        headers: {
+          Authorization: `Bearer ${activeToken}`,
+        },
+      })
+      if (!response.ok) {
+        throw new Error(await readError(response, 'Could not load chat history.'))
+      }
+      const body = (await response.json()) as ChatHistoryResponse
+      setMessages(body.messages)
+    } catch (err) {
+      setToken('')
+      setAuthError(toMessage(err))
+      setStatus('Your saved session expired. Please log in again.')
+    } finally {
+      setIsLoadingHistory(false)
+    }
+  }
+
+  function applyAuth(body: AuthResponse, nextStatus: string) {
+    setUsername(body.username)
+    setToken(body.token)
+    setAuthError('')
+    setStatus(nextStatus)
+    setPage('recommended')
+  }
+
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const name = loginName.trim()
+    if (!name) {
+      setAuthError('Enter a username first.')
+      return
+    }
+    setIsLoggingIn(true)
+    setAuthError('')
+    setStatus('Logging in...')
+    try {
+      const response = await fetch('/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: name }),
+      })
+      if (!response.ok) {
+        throw new Error(await readError(response, 'Login failed.'))
+      }
+      const body = (await response.json()) as AuthResponse
+      applyAuth(body, `Logged in as ${body.username}.`)
+    } catch (err) {
+      setAuthError(toMessage(err))
+      setStatus('Could not log in.')
+    } finally {
+      setIsLoggingIn(false)
+    }
+  }
+
+  async function handleSignup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const name = signupName.trim()
+    if (!name) {
+      setAuthError('Enter a username to sign up.')
+      return
+    }
+    setIsSigningUp(true)
+    setAuthError('')
+    setStatus('Signing up...')
+    try {
+      const response = await fetch('/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: name }),
+      })
+      if (!response.ok) {
+        throw new Error(await readError(response, 'Signup failed.'))
+      }
+      const body = (await response.json()) as AuthResponse
+      setSignupName('')
+      applyAuth(body, `Welcome, ${body.username}. Your account is ready.`)
+    } catch (err) {
+      setAuthError(toMessage(err))
+      setStatus('Could not sign up.')
+    } finally {
+      setIsSigningUp(false)
+    }
+  }
+
+  function handleLogout() {
+    setToken('')
+    setUsername('')
+    setAuthError('')
+    setStatus('Signed out. Log in again to refresh your recommendations and chat.')
+    setPage('login')
+  }
 
   async function waitForSocketOpen(timeoutMs = 1500) {
     const socket = socketRef.current
@@ -339,7 +510,6 @@ function App() {
     try {
       await waitForSocketOpen()
 
-      // Kick off cognee quiz prefetch now so it has ~40s to resolve before Scene D.
       const liveQuizPromise = fetchLiveQuiz(token, SCENE_D_QUIZ_TOPIC, 3).catch((err) => {
         console.warn('[Scene D] live quiz prefetch failed:', err)
         return null
@@ -350,16 +520,13 @@ function App() {
       await sleep(typingDurationMs(SCENE_A_PING) + POST_BUBBLE_BREATH_MS)
 
       setStatus('Scene B+C · LIVE LLM + cognee — powerset Q')
-      // Fire the live LLM call BEFORE typing the user bubble so latency hides
-      // behind the typing + gap animation (~3s).
       const liveChatPromise = postJSON('/chat/messages', { content: SCENE_B_USER_LINE })
-        .then((r) => r.json() as Promise<ChatReplyResponse>)
+        .then((response) => response.json() as Promise<ChatReplyResponse>)
         .catch((err) => {
           console.warn('[Scene B+C] /chat/messages failed:', err)
           return null
         })
 
-      // Show the user bubble optimistically (client-side temp) so typing starts now.
       const tempUserMsg: ChatMessage = {
         id: -Date.now(),
         user_id: 0,
@@ -382,7 +549,7 @@ function App() {
 
       if (liveBody && liveBody.assistant_message?.content) {
         setMessages((current) =>
-          current.some((m) => m.id === liveBody.assistant_message.id)
+          current.some((message) => message.id === liveBody.assistant_message.id)
             ? current
             : [...current, liveBody.assistant_message],
         )
@@ -395,7 +562,7 @@ function App() {
           id: -Date.now() - 1,
           user_id: 0,
           timestamp: new Date().toISOString(),
-          author: 'system',
+          author: 'TumTum',
           sequence_number: 0,
           content: SCENE_C_REPLY,
         }
@@ -439,7 +606,6 @@ function App() {
       await sleep(typingDurationMs(SCENE_F_MOOD_PING) + POST_BUBBLE_BREATH_MS)
 
       setStatus('Scene G · LIVE LLM — adaptive reply')
-      const live = SCENE_G_USER_LINE
       setIsSending(true)
       try {
         const response = await fetch('/chat/messages', {
@@ -448,28 +614,31 @@ function App() {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ content: live }),
+          body: JSON.stringify({ content: SCENE_G_USER_LINE }),
         })
         if (!response.ok) {
           throw new Error(`chat ${response.status}`)
         }
         const body = (await response.json()) as ChatReplyResponse
         setMessages((current) =>
-          current.some((m) => m.id === body.user_message.id)
+          current.some((message) => message.id === body.user_message.id)
             ? current
             : [...current, body.user_message],
         )
-        await sleep(typingDurationMs(live) + POST_USER_GAP_MS)
+        await sleep(typingDurationMs(SCENE_G_USER_LINE) + POST_USER_GAP_MS)
         setMessages((current) =>
-          current.some((m) => m.id === body.assistant_message.id)
+          current.some((message) => message.id === body.assistant_message.id)
             ? current
             : [...current, body.assistant_message],
         )
-        await sleep(typingDurationMs(body.assistant_message.content) + POST_BUBBLE_BREATH_MS)
+        await sleep(
+          typingDurationMs(body.assistant_message.content) + POST_BUBBLE_BREATH_MS,
+        )
       } finally {
         setIsSending(false)
       }
       setStatus('Demo complete.')
+      void refreshOverview()
     } catch (err) {
       setStatus(`Demo run failed: ${toMessage(err)}`)
     } finally {
@@ -483,8 +652,19 @@ function App() {
       return
     }
     const outgoing = draft.trim()
+    const tempUserMessage: ChatMessage = {
+      id: -Date.now(),
+      user_id: 0,
+      timestamp: new Date().toISOString(),
+      author: 'user',
+      sequence_number: 0,
+      content: outgoing,
+    }
     setDraft('')
     setIsSending(true)
+    setPendingUserMessageId(tempUserMessage.id)
+    animatedIdsRef.current.add(tempUserMessage.id)
+    setMessages((current) => [...current, tempUserMessage])
     setStatus('Live LLM reply...')
     try {
       const response = await fetch('/chat/messages', {
@@ -500,20 +680,23 @@ function App() {
       }
       const body = (await response.json()) as ChatReplyResponse
       setMessages((current) => {
-        const next = [...current]
-        for (const message of [body.user_message, body.assistant_message]) {
-          if (!next.some((m) => m.id === message.id)) {
-            next.push(message)
-          }
+        const next = current.filter((message) => message.id !== tempUserMessage.id)
+        if (!next.some((item) => item.id === body.user_message.id)) {
+          next.push(body.user_message)
+        }
+        if (!next.some((item) => item.id === body.assistant_message.id)) {
+          next.push(body.assistant_message)
         }
         return next
       })
       setStatus('Live LLM reply delivered.')
     } catch (err) {
+      setMessages((current) => current.filter((message) => message.id !== tempUserMessage.id))
       setDraft(outgoing)
       setStatus(`Send failed: ${toMessage(err)}`)
     } finally {
       setIsSending(false)
+      setPendingUserMessageId(null)
     }
   }
 
@@ -545,94 +728,256 @@ function App() {
       quizDoneResolverRef.current = null
       resolver?.()
     },
-    [token, refreshOverview, activeQuiz],
+    [activeQuiz, refreshOverview],
   )
+
+  const recommendedItems = buildRecommendations(overview)
 
   return (
     <div className="app-shell">
-      <Sidebar overview={overview} />
-      <main className="app-main">
-        <header className="demo-header">
-          <div>
-            <p className="eyebrow">TumTum · Study Coach</p>
-            <h1>Chat with Odin</h1>
-          </div>
-          <div className="status-pill" aria-live="polite">
-            <button
-              type="button"
-              className="play-button"
-              onClick={() => void runFullDemo()}
-              disabled={!token || isAutoRunning}
-            >
-              {isAutoRunning ? '▸ Running demo...' : '▶ Play demo'}
-            </button>
-            <span className="status-text">{status}</span>
-          </div>
-        </header>
+      <Sidebar
+        overview={overview}
+        activePage={page}
+        isAuthenticated={Boolean(token)}
+        username={username}
+        onNavigate={setPage}
+        onLogout={handleLogout}
+      />
 
-        <section className="chat-panel">
-          <div className="message-list" ref={listRef}>
-            {messages.length === 0 ? (
-              <div className="empty-state">
-                <p>No messages yet — press Play demo to start.</p>
-              </div>
-            ) : (
-              messages.map((message) => (
-                <article
-                  key={message.id}
-                  className={`message-bubble message-${message.author}`}
-                >
+      <main className="app-main">
+        <MainHeader
+          page={page}
+          username={username}
+          status={status}
+          isAuthenticated={Boolean(token)}
+          isBusy={isAutoRunning}
+          onPlayDemo={() => void runFullDemo()}
+          onNavigate={setPage}
+        />
+
+        {page === 'login' ? (
+          <AuthPage
+            key="login"
+            title="Log in"
+            eyebrow="Backend-compatible auth"
+            description="Uses the same username-only POST /login flow as the main frontend."
+            value={loginName}
+            onChange={setLoginName}
+            placeholder="existing username"
+            submitLabel={isLoggingIn ? 'Logging in...' : 'Log in'}
+            helper="Use an existing username from the backend."
+            onSubmit={handleLogin}
+            isSubmitting={isLoggingIn}
+            error={authError}
+            secondaryAction={
+              <Button type="button" variant="ghost" onClick={() => setPage('signup')}>
+                Need an account?
+              </Button>
+            }
+          />
+        ) : null}
+
+        {page === 'signup' ? (
+          <AuthPage
+            key="signup"
+            title="Create account"
+            eyebrow="Simple signup"
+            description="Creates a backend user with POST /signup and immediately stores the returned token."
+            value={signupName}
+            onChange={setSignupName}
+            placeholder="pick a username"
+            submitLabel={isSigningUp ? 'Creating...' : 'Sign up'}
+            helper="Usernames are unique and trimmed server-side."
+            onSubmit={handleSignup}
+            isSubmitting={isSigningUp}
+            error={authError}
+            secondaryAction={
+              <Button type="button" variant="ghost" onClick={() => setPage('login')}>
+                Already have one?
+              </Button>
+            }
+          />
+        ) : null}
+
+        {page === 'recommended' ? (
+          <RecommendedEventsPage
+            username={username}
+            isAuthenticated={Boolean(token)}
+            isLoading={isLoadingOverview}
+            overview={overview}
+            items={recommendedItems}
+            onNavigate={setPage}
+          />
+        ) : null}
+
+        {page === 'chat' ? (
+          <section className="chat-panel">
+            <div className="message-list" ref={listRef}>
+              {!token ? (
+                <div className="empty-state">
+                  <p>Log in first to use chat.</p>
+                </div>
+              ) : isLoadingHistory ? (
+                <div className="empty-state">
+                  <p>Loading saved messages...</p>
+                </div>
+              ) : messages.length === 0 ? (
+                <div className="empty-state">
+                  <p>No chat history yet. Ask a question to create the first turn.</p>
+                </div>
+              ) : (
+                messages.map((message) => (
+                  <article
+                    key={message.id}
+                    className={`message-bubble message-${message.author}`}
+                  >
+                    <div className="message-meta">
+                      <span className="message-meta-lead">
+                        <span>{message.author === 'user' ? username || 'user' : 'TumTum'}</span>
+                        {message.author !== 'user' && message.processing_ms != null ? (
+                          <Badge variant="success">{message.processing_ms} ms</Badge>
+                        ) : null}
+                      </span>
+                      <span className="message-time">
+                        #{message.sequence_number} · {formatTime(message.timestamp)}
+                      </span>
+                    </div>
+                    <p>{displayMessageContent(message.content)}</p>
+                  </article>
+                ))
+              )}
+              {pendingUserMessageId != null ? (
+                <article className="message-bubble message-system typing-indicator-bubble">
                   <div className="message-meta">
                     <span className="message-meta-lead">
-                      <span>{message.author === 'user' ? DEMO_USERNAME : 'tumtum'}</span>
-                      {message.author === 'system' ? (
-                        message.processing_ms != null ? (
-                          <Badge variant="success">
-                            LIVE LLM · {message.processing_ms} ms
-                          </Badge>
-                        ) : (
-                          <Badge variant="muted">scripted</Badge>
-                        )
-                      ) : null}
+                      <span>TumTum</span>
+                      <Badge variant="muted">typing</Badge>
                     </span>
-                    <span className="message-time">{formatTime(message.timestamp)}</span>
                   </div>
-                  <TypingText
-                    content={message.content}
-                    shouldAnimate={!animatedIdsRef.current.has(message.id)}
-                    onDone={() => animatedIdsRef.current.add(message.id)}
-                  />
+                  <div className="typing-indicator-dots" aria-label="TumTum is typing">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
                 </article>
-              ))
-            )}
-          </div>
-
-          <form className="composer" onSubmit={handleSend}>
-            <textarea
-              id="message"
-              name="message"
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault()
-                  void handleSend(event as unknown as FormEvent<HTMLFormElement>)
-                }
-              }}
-              placeholder="Write a message..."
-              rows={3}
-              disabled={!token || isSending || isAutoRunning}
-            />
-            <div className="composer-actions">
-              <p className="helper-text">
-                Press ▶ Play demo for the full scripted 7-scene run.
-              </p>
-              <button type="submit" disabled={!token || isSending || isAutoRunning || !draft.trim()}>
-                {isSending ? 'Sending...' : 'Send'}
-              </button>
+              ) : null}
             </div>
-          </form>
-        </section>
+
+            <form className="composer" onSubmit={handleSend}>
+              <textarea
+                id="chat-message"
+                name="chat-message"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder="Ask about your study notes, diary, quizzes, or schedules..."
+                rows={4}
+                disabled={!token || isSending}
+              />
+              <div className="composer-actions">
+                <p className="helper-text">
+                  {token
+                    ? 'Each send stores your message and the backend reply.'
+                    : 'Log in first to enable sending.'}
+                </p>
+                <button type="submit" disabled={!token || isSending || !draft.trim()}>
+                  {isSending ? 'Sending...' : 'Send'}
+                </button>
+              </div>
+            </form>
+          </section>
+        ) : null}
+
+        {page === 'demo' ? (
+          <section className="chat-panel">
+            <div className="message-list" ref={listRef}>
+              {!token ? (
+                <div className="empty-state">
+                  <p>Log in first to use the demo chat.</p>
+                </div>
+              ) : isLoadingHistory ? (
+                <div className="empty-state">
+                  <p>Loading saved messages...</p>
+                </div>
+              ) : messages.length === 0 ? (
+                <div className="empty-state">
+                  <p>No messages yet — press Play demo to start.</p>
+                </div>
+              ) : (
+                messages.map((message) => (
+                  <article
+                    key={message.id}
+                    className={`message-bubble message-${message.author}`}
+                  >
+                    <div className="message-meta">
+                      <span className="message-meta-lead">
+                        <span>{message.author === 'user' ? username || 'you' : 'tumtum'}</span>
+                        {message.author !== 'user' ? (
+                          message.processing_ms != null ? (
+                            <Badge variant="success">
+                              LIVE LLM · {message.processing_ms} ms
+                            </Badge>
+                          ) : (
+                            <Badge variant="muted">scripted</Badge>
+                          )
+                        ) : null}
+                      </span>
+                      <span className="message-time">{formatTime(message.timestamp)}</span>
+                    </div>
+                    <TypingText
+                      content={displayMessageContent(message.content)}
+                      shouldAnimate={!animatedIdsRef.current.has(message.id)}
+                      onDone={() => animatedIdsRef.current.add(message.id)}
+                    />
+                  </article>
+                ))
+              )}
+              {pendingUserMessageId != null ? (
+                <article className="message-bubble message-system typing-indicator-bubble">
+                  <div className="message-meta">
+                    <span className="message-meta-lead">
+                      <span>tumtum</span>
+                      <Badge variant="muted">typing</Badge>
+                    </span>
+                  </div>
+                  <div className="typing-indicator-dots" aria-label="TumTum is typing">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                </article>
+              ) : null}
+            </div>
+
+            <form className="composer" onSubmit={handleSend}>
+              <textarea
+                id="message"
+                name="message"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault()
+                    void handleSend(event as unknown as FormEvent<HTMLFormElement>)
+                  }
+                }}
+                placeholder="Write a message..."
+                rows={3}
+                disabled={!token || isSending || isAutoRunning}
+              />
+              <div className="composer-actions">
+                <p className="helper-text">
+                  Press ▶ Play demo for the full scripted 7-scene run.
+                </p>
+                <button
+                  type="submit"
+                  disabled={!token || isSending || isAutoRunning || !draft.trim()}
+                >
+                  {isSending ? 'Sending...' : 'Send'}
+                </button>
+              </div>
+            </form>
+          </section>
+        ) : null}
       </main>
 
       {quizOpen ? (
@@ -649,6 +994,239 @@ function App() {
         />
       ) : null}
     </div>
+  )
+}
+
+function MainHeader({
+  page,
+  username,
+  status,
+  isAuthenticated,
+  isBusy,
+  onPlayDemo,
+  onNavigate,
+}: {
+  page: Page
+  username: string
+  status: string
+  isAuthenticated: boolean
+  isBusy: boolean
+  onPlayDemo: () => void
+  onNavigate: (page: Page) => void
+}) {
+  return (
+    <header className="demo-header">
+      <div>
+        <p className="eyebrow">TumTum · Frontend demo</p>
+        <h1>{PAGE_LABELS[page]}</h1>
+      </div>
+      <div className="status-pill" aria-live="polite">
+        {page === 'demo' && isAuthenticated ? (
+          <button type="button" className="play-button" onClick={onPlayDemo} disabled={isBusy}>
+            {isBusy ? '▸ Running demo...' : '▶ Play demo'}
+          </button>
+        ) : null}
+        {page === 'recommended' && isAuthenticated ? (
+          <button type="button" className="play-button" onClick={() => onNavigate('chat')}>
+            Open chat
+          </button>
+        ) : null}
+        <span className="status-text">
+          {isAuthenticated && username ? `${username} · ${status}` : status}
+        </span>
+      </div>
+    </header>
+  )
+}
+
+function AuthPage({
+  title,
+  eyebrow,
+  description,
+  value,
+  onChange,
+  placeholder,
+  submitLabel,
+  helper,
+  onSubmit,
+  isSubmitting,
+  error,
+  secondaryAction,
+}: {
+  title: string
+  eyebrow: string
+  description: string
+  value: string
+  onChange: (value: string) => void
+  placeholder: string
+  submitLabel: string
+  helper: string
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void
+  isSubmitting: boolean
+  error: string
+  secondaryAction?: ReactNode
+}) {
+  return (
+    <section className="auth-page">
+      <Card className="auth-card auth-card-highlight">
+        <CardHeader
+          title={title}
+          subtitle={description}
+          action={<Badge variant="accent">{eyebrow}</Badge>}
+        />
+        <CardContent>
+          <form className="auth-form" onSubmit={onSubmit}>
+            <label className="auth-label" htmlFor="auth-username">
+              Username
+            </label>
+            <input
+              id="auth-username"
+              className="auth-input"
+              value={value}
+              onChange={(event) => onChange(event.target.value)}
+              placeholder={placeholder}
+              autoComplete="username"
+              disabled={isSubmitting}
+            />
+            <div className="auth-actions">
+              <Button type="submit" disabled={isSubmitting || !value.trim()}>
+                {submitLabel}
+              </Button>
+              {secondaryAction}
+            </div>
+            <p className="helper-text">{helper}</p>
+            {error ? <p className="auth-error">{error}</p> : null}
+          </form>
+        </CardContent>
+      </Card>
+    </section>
+  )
+}
+
+function RecommendedEventsPage({
+  username,
+  isAuthenticated,
+  isLoading,
+  overview,
+  items,
+  onNavigate,
+}: {
+  username: string
+  isAuthenticated: boolean
+  isLoading: boolean
+  overview: OverviewResp | null
+  items: RecommendedItem[]
+  onNavigate: (page: Page) => void
+}) {
+  const data = overview ?? buildFallbackOverview()
+  const nextEvent = data.upcoming_events[0]
+  const nextDeadline = data.upcoming_deadlines[0]
+
+  if (!isAuthenticated) {
+    return (
+      <section className="auth-page">
+        <Card className="auth-card auth-card-highlight">
+          <CardHeader
+            title="Recommended events"
+            subtitle="Log in to load the personalized overview from the backend."
+          />
+          <CardContent>
+            <div className="auth-actions">
+              <Button type="button" onClick={() => onNavigate('login')}>
+                Go to login
+              </Button>
+              <Button type="button" variant="ghost" onClick={() => onNavigate('signup')}>
+                Create account
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+    )
+  }
+
+  return (
+    <section className="recommended-page">
+      <div className="recommended-hero">
+        <div>
+          <p className="eyebrow">Personalized view</p>
+          <h2>{username ? `${username}'s next best moves` : 'Your next best moves'}</h2>
+        </div>
+        <div className="recommended-actions">
+          {isLoading ? <Badge variant="muted">Refreshing...</Badge> : null}
+          <Button type="button" onClick={() => onNavigate('chat')}>
+            Open chat
+          </Button>
+        </div>
+      </div>
+
+      <div className="recommended-summary-grid">
+        <Card>
+          <CardHeader title="Courses" subtitle="Tracked in your backend profile" />
+          <CardContent>
+            <p className="summary-number">{data.courses.length}</p>
+            <p className="summary-caption">
+              {data.courses.map((course) => course.name).slice(0, 3).join(' · ') || 'No courses yet'}
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader title="Next event" subtitle={nextEvent ? nextEvent.course_name : 'No event found'} />
+          <CardContent>
+            <p className="summary-number">
+              {nextEvent ? formatDayTime(nextEvent.start_datetime) : 'None'}
+            </p>
+            <p className="summary-caption">{nextEvent?.name ?? 'Add schedule items to improve recommendations.'}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader
+            title="Next deadline"
+            subtitle={nextDeadline ? nextDeadline.course_name : 'No deadline found'}
+          />
+          <CardContent>
+            <p className="summary-number">
+              {nextDeadline ? formatDayTime(nextDeadline.datetime) : 'None'}
+            </p>
+            <p className="summary-caption">
+              {nextDeadline?.name ?? 'Deadlines will appear here once they exist in the backend.'}
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader title="Quiz momentum" subtitle="Pulled from saved quiz results" />
+          <CardContent>
+            <p className="summary-number">{data.quiz.average_percent}%</p>
+            <p className="summary-caption">{data.quiz.total_taken} quizzes recorded</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="recommended-grid">
+        {items.map((item) => (
+          <Card key={item.id} className="recommended-card">
+            <CardHeader
+              title={item.title}
+              subtitle={item.course}
+              action={
+                <Badge variant={item.tone === 'danger' ? 'danger' : item.tone === 'success' ? 'success' : 'accent'}>
+                  {item.badge}
+                </Badge>
+              }
+            />
+            <CardContent className="recommended-card-body">
+              <div className="recommended-time-row">
+                <span className="recommended-time-primary">{item.primaryTime}</span>
+                {item.secondaryTime ? (
+                  <span className="recommended-time-secondary">{item.secondaryTime}</span>
+                ) : null}
+              </div>
+              <p className="recommended-reason">{item.reason}</p>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </section>
   )
 }
 
@@ -672,7 +1250,7 @@ function TypingText({
       return
     }
     const handle = setTimeout(() => {
-      setShown((s) => Math.min(s + 1, content.length))
+      setShown((current) => Math.min(current + 1, content.length))
     }, TYPING_MS_PER_CHAR)
     return () => clearTimeout(handle)
   }, [shouldAnimate, shown, content, onDone])
@@ -734,12 +1312,6 @@ const MOCK_RECENT_WINS: { when: string; text: string }[] = [
   { when: 'yesterday', text: 'Unlocked "5-day streak" milestone' },
 ]
 
-const MOCK_QUICK_ACTIONS = [
-  { key: 'pomodoro', label: 'Start 25-min focus' },
-  { key: 'flashcards', label: 'Flashcards: DS (12 due)' },
-  { key: 'tumtum', label: 'Ask TumTum anything' },
-]
-
 const MOCK_COURSES: OverviewCourse[] = [
   { id: -1, name: 'Diskrete Strukturen' },
   { id: -2, name: 'Einführung in die Informatik' },
@@ -752,32 +1324,32 @@ const MOCK_EVENTS: OverviewEvent[] = [
     course_name: 'Diskrete Strukturen',
     type: 'Tutorial',
     name: 'DS Tutorgruppe 4 · Powerset practice',
-    start_datetime: '2025-11-14T14:00:00Z',
-    end_datetime: '2025-11-14T15:30:00Z',
+    start_datetime: '2026-04-20T14:00:00Z',
+    end_datetime: '2026-04-20T15:30:00Z',
   },
   {
     id: -2,
     course_name: 'Einführung in die Informatik',
     type: 'Lecture',
     name: 'EInf · Rekursion (H5 prep)',
-    start_datetime: '2025-11-17T10:00:00Z',
-    end_datetime: '2025-11-17T11:30:00Z',
+    start_datetime: '2026-04-21T10:00:00Z',
+    end_datetime: '2026-04-21T11:30:00Z',
   },
   {
     id: -3,
     course_name: 'Diskrete Strukturen',
     type: 'Lecture',
     name: 'DS · DFA minimization',
-    start_datetime: '2025-11-19T09:30:00Z',
-    end_datetime: '2025-11-19T11:00:00Z',
+    start_datetime: '2026-04-22T09:30:00Z',
+    end_datetime: '2026-04-22T11:00:00Z',
   },
   {
     id: -4,
     course_name: 'Analysis für Informatik',
     type: 'Lecture',
     name: 'Analysis · Potenzreihen',
-    start_datetime: '2025-11-18T10:00:00Z',
-    end_datetime: '2025-11-18T12:00:00Z',
+    start_datetime: '2026-04-23T10:00:00Z',
+    end_datetime: '2026-04-23T12:00:00Z',
   },
 ]
 
@@ -786,19 +1358,19 @@ const MOCK_DEADLINES: OverviewDeadline[] = [
     id: -1,
     course_name: 'Diskrete Strukturen',
     name: 'DS Übungsblatt 8',
-    datetime: '2025-11-18T23:59:00Z',
+    datetime: '2026-04-21T23:59:00Z',
   },
   {
     id: -2,
     course_name: 'Einführung in die Informatik',
     name: 'EInf H5 (Rekursion)',
-    datetime: '2025-11-20T23:59:00Z',
+    datetime: '2026-04-22T23:59:00Z',
   },
   {
     id: -3,
     course_name: 'Analysis für Informatik',
     name: 'Analysis Übungsblatt 5',
-    datetime: '2025-11-21T23:59:00Z',
+    datetime: '2026-04-24T23:59:00Z',
   },
 ]
 
@@ -807,19 +1379,27 @@ const MOCK_QUIZ_STAT: OverviewQuizStat = {
   average_percent: 73,
 }
 
-function Sidebar({ overview }: { overview: OverviewResp | null }) {
-  const courses =
-    overview && overview.courses.length > 0 ? overview.courses : MOCK_COURSES
-  const events =
-    overview && overview.upcoming_events.length > 0
-      ? overview.upcoming_events
-      : MOCK_EVENTS
-  const deadlines =
-    overview && overview.upcoming_deadlines.length > 0
-      ? overview.upcoming_deadlines
-      : MOCK_DEADLINES
-  const quiz =
-    overview && overview.quiz.total_taken > 0 ? overview.quiz : MOCK_QUIZ_STAT
+function Sidebar({
+  overview,
+  activePage,
+  isAuthenticated,
+  username,
+  onNavigate,
+  onLogout,
+}: {
+  overview: OverviewResp | null
+  activePage: Page
+  isAuthenticated: boolean
+  username: string
+  onNavigate: (page: Page) => void
+  onLogout: () => void
+}) {
+  const data = overview ?? buildFallbackOverview()
+  const navItems: { page: Page; label: string; requiresAuth?: boolean }[] = [
+    { page: 'recommended', label: 'Recommended', requiresAuth: true },
+    { page: 'chat', label: 'Chat', requiresAuth: true },
+    { page: 'demo', label: 'Demo chat', requiresAuth: true },
+  ]
 
   return (
     <aside className="sidebar">
@@ -829,8 +1409,43 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
           <p className="eyebrow">TumTum</p>
           <p className="sidebar-brand-sub">Study coach</p>
         </div>
-        <GlowDot color="success" />
+        <GlowDot color={isAuthenticated ? 'success' : 'danger'} />
       </div>
+
+      <SidebarSection title="Navigation">
+        <div className="sidebar-nav">
+          {navItems.map((item) => {
+            const locked = item.requiresAuth && !isAuthenticated
+            return (
+              <button
+                key={item.page}
+                type="button"
+                className={`sidebar-nav-link ${activePage === item.page ? 'is-active' : ''}`}
+                onClick={() => onNavigate(locked ? 'login' : item.page)}
+              >
+                <span>{item.label}</span>
+                {locked ? <Badge variant="muted">Auth</Badge> : null}
+              </button>
+            )
+          })}
+        </div>
+      </SidebarSection>
+
+      <SidebarSection title="Session">
+        <div className="sidebar-session">
+          <p className="sidebar-session-user">{isAuthenticated ? username || 'Signed in' : 'Guest'}</p>
+          <p className="sidebar-session-copy">
+            {isAuthenticated
+              ? 'Recommendations and chat now use your backend token.'
+              : 'Log in to load real events, deadlines, and saved chat history.'}
+          </p>
+          {isAuthenticated ? (
+            <Button type="button" variant="ghost" size="sm" onClick={onLogout}>
+              Sign out
+            </Button>
+          ) : null}
+        </div>
+      </SidebarSection>
 
       <SidebarSection title="Focus today">
         <div className="sidebar-stats">
@@ -839,12 +1454,8 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
             <span className="sidebar-stat-label">streak</span>
           </div>
           <div className="sidebar-stat">
-            <span className="sidebar-stat-value">
-              {MOCK_FOCUS_STATS.minutes_today}m
-            </span>
-            <span className="sidebar-stat-label">
-              of {MOCK_FOCUS_STATS.minutes_goal}m
-            </span>
+            <span className="sidebar-stat-value">{MOCK_FOCUS_STATS.minutes_today}m</span>
+            <span className="sidebar-stat-label">of {MOCK_FOCUS_STATS.minutes_goal}m</span>
           </div>
         </div>
         <div
@@ -865,11 +1476,11 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
           />
         </div>
         <div className="sidebar-heatmap" aria-label="Last 7 days of focus minutes">
-          {MOCK_STREAK_WEEK.map((day, idx) => {
+          {MOCK_STREAK_WEEK.map((day) => {
             const level = Math.min(4, Math.floor(day.minutes / 45))
             return (
               <div
-                key={idx}
+                key={day.label}
                 className={`sidebar-heatmap-cell sidebar-heatmap-lvl-${level}`}
                 title={`${day.label}: ${day.minutes} min`}
               >
@@ -882,23 +1493,20 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
 
       <SidebarSection title="Topic focus">
         <ul className="sidebar-list sidebar-topics">
-          {MOCK_TOPIC_FOCUS.map((t, idx) => (
-            <li key={idx} className="sidebar-topic">
+          {MOCK_TOPIC_FOCUS.map((topic) => (
+            <li key={topic.topic} className="sidebar-topic">
               <div className="sidebar-topic-head">
-                <span className="sidebar-topic-title">{t.topic}</span>
-                <span className={`sidebar-topic-trend sidebar-topic-trend-${t.trend}`}>
-                  {t.trend === 'up' ? '↑' : t.trend === 'down' ? '↓' : '→'}
+                <span className="sidebar-topic-title">{topic.topic}</span>
+                <span className={`sidebar-topic-trend sidebar-topic-trend-${topic.trend}`}>
+                  {topic.trend === 'up' ? '↑' : topic.trend === 'down' ? '↓' : '→'}
                 </span>
               </div>
               <div className="sidebar-topic-meta">
-                <span className="sidebar-topic-course">{t.course}</span>
-                <span className="sidebar-topic-pct">{t.mastery}%</span>
+                <span className="sidebar-topic-course">{topic.course}</span>
+                <span className="sidebar-topic-pct">{topic.mastery}%</span>
               </div>
               <div className="sidebar-topic-bar" aria-hidden>
-                <div
-                  className="sidebar-topic-bar-fill"
-                  style={{ width: `${t.mastery}%` }}
-                />
+                <div className="sidebar-topic-bar-fill" style={{ width: `${topic.mastery}%` }} />
               </div>
             </li>
           ))}
@@ -907,19 +1515,12 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
 
       <SidebarSection title="Study plan">
         <ul className="sidebar-list sidebar-plan">
-          {MOCK_STUDY_PLAN.map((slot, idx) => (
-            <li
-              key={idx}
-              className={`sidebar-plan-item sidebar-plan-${slot.status}`}
-            >
+          {MOCK_STUDY_PLAN.map((slot) => (
+            <li key={`${slot.time}-${slot.title}`} className={`sidebar-plan-item sidebar-plan-${slot.status}`}>
               <span className="sidebar-plan-time">{slot.time}</span>
               <span className="sidebar-plan-title">{slot.title}</span>
               <span className="sidebar-plan-badge">
-                {slot.status === 'done'
-                  ? '✓'
-                  : slot.status === 'now'
-                    ? 'now'
-                    : ''}
+                {slot.status === 'done' ? '✓' : slot.status === 'now' ? 'now' : ''}
               </span>
             </li>
           ))}
@@ -928,7 +1529,7 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
 
       <SidebarSection title="Courses">
         <ul className="sidebar-list">
-          {courses.map((course) => (
+          {data.courses.map((course) => (
             <li key={course.id} className="sidebar-item">
               <span className="sidebar-dot" aria-hidden />
               <span>{course.name}</span>
@@ -939,8 +1540,8 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
 
       <SidebarSection title="Recent wins">
         <ul className="sidebar-list sidebar-wins">
-          {MOCK_RECENT_WINS.map((win, idx) => (
-            <li key={idx} className="sidebar-win">
+          {MOCK_RECENT_WINS.map((win) => (
+            <li key={`${win.when}-${win.text}`} className="sidebar-win">
               <span className="sidebar-win-when">{win.when}</span>
               <span className="sidebar-win-text">{win.text}</span>
             </li>
@@ -948,20 +1549,9 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
         </ul>
       </SidebarSection>
 
-      <SidebarSection title="Quick actions">
-        <div className="sidebar-actions">
-          {MOCK_QUICK_ACTIONS.map((a) => (
-            <button key={a.key} type="button" className="sidebar-action">
-              <span className="sidebar-action-label">{a.label}</span>
-              <span className="sidebar-action-chev" aria-hidden>›</span>
-            </button>
-          ))}
-        </div>
-      </SidebarSection>
-
       <SidebarSection title="Upcoming events">
         <ul className="sidebar-list">
-          {events.map((event) => (
+          {data.upcoming_events.map((event) => (
             <li key={event.id} className="sidebar-item sidebar-item-stack">
               <div className="sidebar-item-row">
                 <span className="sidebar-item-title">{event.name}</span>
@@ -978,7 +1568,7 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
 
       <SidebarSection title="Deadlines">
         <ul className="sidebar-list">
-          {deadlines.map((deadline) => (
+          {data.upcoming_deadlines.map((deadline) => (
             <li key={deadline.id} className="sidebar-item sidebar-item-stack">
               <div className="sidebar-item-row">
                 <span className="sidebar-item-title">{deadline.name}</span>
@@ -996,11 +1586,11 @@ function Sidebar({ overview }: { overview: OverviewResp | null }) {
       <SidebarSection title="Quiz performance">
         <div className="sidebar-stats">
           <div className="sidebar-stat">
-            <span className="sidebar-stat-value">{quiz.total_taken}</span>
+            <span className="sidebar-stat-value">{data.quiz.total_taken}</span>
             <span className="sidebar-stat-label">quizzes</span>
           </div>
           <div className="sidebar-stat">
-            <span className="sidebar-stat-value">{quiz.average_percent}%</span>
+            <span className="sidebar-stat-value">{data.quiz.average_percent}%</span>
             <span className="sidebar-stat-label">avg score</span>
           </div>
         </div>
@@ -1075,7 +1665,7 @@ function QuizOverlay({
       }
       setAnswers(nextAnswers)
       setSelected(null)
-      setIndex((i) => i + 1)
+      setIndex((currentIndex) => currentIndex + 1)
     }
 
     void autoStep()
@@ -1102,7 +1692,7 @@ function QuizOverlay({
     }
     setAnswers(nextAnswers)
     setSelected(null)
-    setIndex((i) => i + 1)
+    setIndex((currentIndex) => currentIndex + 1)
   }
 
   return (
@@ -1111,11 +1701,7 @@ function QuizOverlay({
         <header className="quiz-header">
           <div className="quiz-title-row">
             <p className="eyebrow">{title}</p>
-            {isLive ? (
-              <Badge variant="success">LIVE · cognee</Badge>
-            ) : (
-              <Badge variant="muted">scripted fallback</Badge>
-            )}
+            {isLive ? <Badge variant="success">LIVE · cognee</Badge> : <Badge variant="muted">scripted fallback</Badge>}
           </div>
           <button type="button" className="ghost-button" onClick={onClose} disabled={autoPlay}>
             Close
@@ -1156,9 +1742,7 @@ function QuizOverlay({
         {revealed ? (
           <div className="quiz-explain">
             <p>
-              <strong>
-                {selected === current.correct_index ? 'Correct.' : 'Not quite.'}
-              </strong>{' '}
+              <strong>{selected === current.correct_index ? 'Correct.' : 'Not quite.'}</strong>{' '}
               {current.explanation}
             </p>
             <p className="quiz-source">Source: {current.source_ref}</p>
@@ -1174,10 +1758,96 @@ function QuizOverlay({
   )
 }
 
+function pageFromHash(hash: string, isAuthenticated: boolean): Page {
+  const raw = hash.replace(/^#/, '')
+  if (raw === 'signup') return 'signup'
+  if (raw === 'recommended') return isAuthenticated ? 'recommended' : 'login'
+  if (raw === 'chat') return isAuthenticated ? 'chat' : 'login'
+  if (raw === 'demo') return isAuthenticated ? 'demo' : 'login'
+  return 'login'
+}
+
+function ensurePublicPage(page: Page): Page {
+  if (page === 'recommended' || page === 'chat' || page === 'demo') {
+    return 'login'
+  }
+  return page
+}
+
+function displayMessageContent(content: string) {
+  return content.replace(
+    /\s*\[(?:tokens:\s*prompt=|tokens=)[^\]]+\]\s*$/i,
+    '',
+  )
+}
+
+function buildFallbackOverview(): OverviewResp {
+  return {
+    now: new Date().toISOString(),
+    courses: MOCK_COURSES,
+    upcoming_events: MOCK_EVENTS,
+    upcoming_deadlines: MOCK_DEADLINES,
+    quiz: MOCK_QUIZ_STAT,
+  }
+}
+
+function buildRecommendations(overview: OverviewResp | null): RecommendedItem[] {
+  const data = overview ?? buildFallbackOverview()
+  const events = data.upcoming_events.slice(0, 4).map((event) => {
+    const hoursAway = hoursUntil(event.start_datetime)
+    return {
+      id: `event-${event.id}`,
+      kind: 'event' as const,
+      title: event.name,
+      course: event.course_name || 'Course',
+      primaryTime: formatDayTime(event.start_datetime),
+      secondaryTime: `${formatShortTime(event.start_datetime)}–${formatShortTime(event.end_datetime)}`,
+      badge: event.type,
+      tone: hoursAway <= 18 ? ('success' as const) : ('accent' as const),
+      reason:
+        hoursAway <= 18
+          ? 'Starting soon, so this is the easiest place to build momentum today.'
+          : 'Coming up next in your schedule and worth planning around early.',
+    }
+  })
+
+  const deadlines = data.upcoming_deadlines.slice(0, 3).map((deadline) => {
+    const hoursAway = hoursUntil(deadline.datetime)
+    return {
+      id: `deadline-${deadline.id}`,
+      kind: 'deadline' as const,
+      title: deadline.name,
+      course: deadline.course_name || 'Course',
+      primaryTime: formatDayTime(deadline.datetime),
+      badge: hoursAway <= 36 ? 'Due soon' : 'Deadline',
+      tone: hoursAway <= 36 ? ('danger' as const) : ('accent' as const),
+      reason:
+        hoursAway <= 36
+          ? 'This deadline is close enough that it should influence what you study next.'
+          : 'A near-future deliverable that pairs well with the upcoming course events.',
+    }
+  })
+
+  return [...deadlines, ...events].slice(0, 6)
+}
+
+function hoursUntil(iso: string) {
+  return Math.round((new Date(iso).getTime() - Date.now()) / 3_600_000)
+}
+
+async function readError(response: Response, fallback: string) {
+  try {
+    const body = (await response.json()) as { detail?: string }
+    return body.detail || fallback
+  } catch {
+    return fallback
+  }
+}
+
 function formatTime(iso: string) {
   try {
-    const d = new Date(iso)
-    return d.toLocaleString(undefined, {
+    const date = new Date(iso)
+    return date.toLocaleString(undefined, {
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
@@ -1188,10 +1858,22 @@ function formatTime(iso: string) {
   }
 }
 
+function formatShortTime(iso: string) {
+  try {
+    const date = new Date(iso)
+    return date.toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return iso
+  }
+}
+
 function formatDayTime(iso: string) {
   try {
-    const d = new Date(iso)
-    return d.toLocaleString(undefined, {
+    const date = new Date(iso)
+    return date.toLocaleString(undefined, {
       weekday: 'short',
       month: 'short',
       day: 'numeric',

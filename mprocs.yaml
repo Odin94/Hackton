@@ -5,3 +5,6 @@ procs:
   frontend:
     shell: "npm run dev"
     cwd: "frontend"
+  frontend-demo:
+    shell: "npm run dev"
+    cwd: "frontend-demo"
